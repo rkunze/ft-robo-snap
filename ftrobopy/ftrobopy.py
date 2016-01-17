@@ -226,6 +226,9 @@ class ftTXT(object):
     self._txt_keep_connection_thread.start()
     return None
 
+  def isOnline(self):
+    return hasattr(self, '_txt_stop_event') and not self._txt_stop_event.is_set
+
   def stopOnline(self):
     """
        Beendet den Onlinebetrieb des TXT und beendet den Python-Thread der fuer den Datenaustausch mit dem TXT verantwortlich war.
@@ -236,6 +239,8 @@ class ftTXT(object):
 
        >>> txt.stopOnline()
     """
+    if not self.isOnline():
+      return None
     self._txt_stop_event.set()
     self._txt_keep_connection_stop_event.set()
     m_id       = 0x9BE5082C
@@ -488,7 +493,6 @@ class ftTXT(object):
 
     """
     if not self._camera_already_running:
-      print 'Camera is not running'
       return
     self._camera_stop_event.set()
     m_id                 = 0x17C31F2F
@@ -1284,7 +1288,7 @@ class camera(threading.Thread):
         if self._total_bytes_read == ds_size:
           response = struct.unpack(fstr, data)
           if response[0] != m_id:
-            print 'WARNING: ResponseID ', hex(response_id),' of cameraOnlineFrame command does not match'
+            print 'WARNING: ResponseID ', hex(response[0]),' of cameraOnlineFrame command does not match'
           self._m_numframesready      = response[1]
           self._m_framewidth          = response[2]
           self._m_frameheight         = response[3]
