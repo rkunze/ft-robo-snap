@@ -1,11 +1,15 @@
 """ A combined HTTP and WebSocket handler realizing the RoboWeb interface"""
+import json
 import urlparse
-from SimpleHTTPServer import SimpleHTTPRequestHandler
+from BaseHTTPServer import BaseHTTPRequestHandler
+from SocketServer import BaseRequestHandler
 
-robotxt_address = 'localhost'
+from roboweb import protocol
+from SimpleHTTPServer import SimpleHTTPRequestHandler
 
 from httpwebsockethandler.HTTPWebSocketsHandler import HTTPWebSocketsHandler
 
+robotxt_address = 'localhost'
 
 def is_static_path(path):
     return (path == '/') or (path == '/index.html') or path.startswith('/snap/') or path.startswith('/ui/')
@@ -36,7 +40,7 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
         additional pages and resources (images, style sheets etc.) for the web interface
     
     The actual web interface is located at ``/control`` and allows communication
-    with the controller using the RoboWeb protocol (see Protocol.py for details).
+    with the controller using the RoboWeb protocol (see protocol.py for details).
     
     Messages can be exchanged either by doing a WebSocket handshake on the
     ``/control`` URL and sending/receiving RoboWeb protocol messages encoded in
@@ -50,6 +54,11 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
 
     server_version = "RoboWeb/0.1"
     protocol_version = "HTTP/1.1"
+
+    def setup(self):
+        HTTPWebSocketsHandler.setup(self)
+        self.robotxt_connection = protocol.connect(self.client_address, robotxt_address)
+
 
     def list_directory(self, path):
         # we do not allow directory listing.
@@ -65,7 +74,7 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
                 # do_GET only returns after client close or socket error.
                 self._read_messages()
             else:
-                self._handle_roboweb_message(dict_from_query_string(self.path[9:]))
+                self._handle_roboweb_message_http(self.path[9:], False)
         else:
             self.send_error(404)
 
@@ -77,13 +86,13 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
 
     def do_POST(self):
         if is_control_path(self.path):
-            type = self.headers.getheader('content-type')
+            content_type = self.headers.getheader('content-type')
             length = int(self.headers.getheader('content-length'))
             message = self.rfile.read(length)
-            if type == 'application/json':
-                self._handle_roboweb_message(dict_from_query_string(message))
-            elif type == 'application/x-www-form-urlencoded':
-                self._handle_roboweb_message(dict_from_query_string(message))
+            if content_type == 'application/json':
+                self._handle_roboweb_message_http(message, True)
+            elif content_type == 'application/x-www-form-urlencoded':
+                self._handle_roboweb_message_http(message, False)
             else:
                 self.send_error(415)
         else:
@@ -96,11 +105,57 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
         pass
 
     def on_ws_closed(self):
-        pass
+        self.robotxt_connection.disconnect()
 
-    def _handle_roboweb_message(self, param):
-        self.send_error(501, 'Not Yet Implemented')
+    def _handle_roboweb_message_http(self, message, is_json = False):
+        try:
+            parsed = json.loads(message, None, None, protocol.Request.from_dict) if is_json else msg_from_query_string(message)
+            response = self.robotxt_connection.send(parsed)
+            if response is None:
+                # For HTTP, we always want a response, so we fake one
+                # if the message did not cause an immediate reply
+                response = dict(status = 'OK')
+        except ValueError as err:
+            response = protocol.Error(err.message)
+        data = json.dumps(response)
+        self.send_response(200) # Note: protocol errors are not encoded in HTTP status codes
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', len(data))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_error(self, code, message=None):
+        self.robotxt_connection.disconnect();
+        BaseHTTPRequestHandler.send_error(self, code, message)
+
+    def __del__(self):
+        self.robotxt_connection.disconnect();
 
 
-def dict_from_query_string(param):
-    pass
+def msg_from_query_string(message):
+    parsed = {}
+    for name, value in urlparse.parse_qsl(message):
+        value = _to_base_type(value)
+        if name in parsed:
+            existing = parsed[name]
+            if isinstance(existing, list):
+                existing.append(value)
+            else:
+                parsed[name] = [existing, value]
+        else:
+            parsed[name] = value
+    return protocol.Request.from_dict(parsed)
+
+def _to_base_type(value):
+    try:
+        return int(value)
+    except ValueError:
+        try:
+            return float(value)
+        except ValueError:
+            if value == 'true':
+                return True
+            elif value == 'false':
+                return False
+            else:
+                return value
