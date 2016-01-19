@@ -128,9 +128,6 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
         self.robotxt_connection.disconnect();
         BaseHTTPRequestHandler.send_error(self, code, message)
 
-    def __del__(self):
-        self.robotxt_connection.disconnect();
-
 
 def msg_from_query_string(message):
     parsed = {}
