@@ -36,7 +36,7 @@ class Request(Message):
     def __init__(self, data):
         self.data = data
 
-    def execute(self, connection):
+    def execute(self, controller, connection):
         pass
 
 
@@ -90,7 +90,7 @@ class Configure(Request):
     an Error message
     """
 
-    def execute(self, connection):
+    def execute(self, controller, connection):
         keep_old_config = True
         if 'default' in self.data:
             if self.data['default'] == 'unchanged':
@@ -105,19 +105,19 @@ class Configure(Request):
             return Error(e.message, e.details)
         if 'mode' in self.data:
             if self.data['mode'] == 'online':
-                connection.startOnline()
+                controller.startOnline()
             elif self.data['mode'] == 'offline':
-                connection.stopOnline()
+                controller.stopOnline()
             else:
                 return Error('Unsupported mode: %s' % self.data['mode'])
         if keep_old_config:
             connection.config.merge(new_config)
         else:
             connection.config = new_config
-        connection.setConfig(connection.config.ftTXT_output_conf(), connection.config.ftTXT_input_conf())
-        if connection._is_online:
-            connection.updateConfig()
-        return ConfigurationReport(connection._is_online, connection.config)
+        controller.setConfig(connection.config.ftTXT_output_conf(), connection.config.ftTXT_input_conf())
+        if controller._is_online:
+            controller.updateConfig()
+        return ConfigurationReport(controller._is_online, connection.config)
 
 
 
@@ -228,13 +228,16 @@ class IOConf(dict):
         super(IOConf, self).update(other)
 
 
-class Connection(ftTXT):
+class Connection:
     """Represents a connection to a TXT controller"""
 
     def __init__(self, id, host, port=65000):
-        super(Connection, self).__init__(host, port)
         self.id = id
         self.config = IOConf()
+        self.controller_id = host + ':' + str(port)
+        if not self.controller_id in controllers:
+            controllers[self.controller_id] = ftrobopy.ftTXT(host, port)
+        self.ftTXT = controllers[self.controller_id];
 
     def send(self, request):
         """
@@ -246,17 +249,19 @@ class Connection(ftTXT):
         :rtype: Response
         :rtype: None
         """
-        return request.execute(self)
+        return request.execute(self.ftTXT, self)
 
     def disconnect(self):
-        self.stopAll()
-        self.stopCameraOnline()
-        self.stopOnline()
+        self.ftTXT.stopAll()
+        self.ftTXT.stopCameraOnline()
+        self.ftTXT.stopOnline()
         active_connections.pop(self.id, None)
+        controllers.pop(self.controller_id, None)
         return None
 
-
 active_connections = {}
+controllers = {}
+
 requests_by_name = {}
 for cls in inspect.getmembers(sys.modules[__name__],
                               lambda cls: inspect.isclass(cls) and issubclass(cls, Request) and not cls is Request):
@@ -264,7 +269,7 @@ for cls in inspect.getmembers(sys.modules[__name__],
 
 
 def connect(client_address, robotxt_address):
-    key = str(client_address) + "->" + str(robotxt_address)
+    key = str(client_address[0]) + "->" + str(robotxt_address)
     if not key in active_connections:
         connection = Connection(key, robotxt_address)
         active_connections[key] = connection;
