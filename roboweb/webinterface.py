@@ -117,6 +117,8 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
                 response = dict(status = 'OK')
         except ValueError as err:
             response = protocol.Error(err.message)
+        except Exception as err:
+            self.send_error(500, "Lost connection to the controller: " + err.message)
         data = json.dumps(response)
         self.send_response(200) # Note: protocol errors are not encoded in HTTP status codes
         self.send_header('Content-Type', 'application/json')
