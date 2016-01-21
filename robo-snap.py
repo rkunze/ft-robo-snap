@@ -15,13 +15,13 @@ import sys
 from BaseHTTPServer import HTTPServer
 from SocketServer import ThreadingMixIn
 
-from roboweb import webinterface
+from roboweb import webinterface, protocol
 
 if len(sys.argv) < 2 or len(sys.argv) > 3:
     print(__doc__.strip())
     sys.exit(1)
 
-webinterface.robotxt_address = sys.argv[1]
+protocol.robotxt_address = sys.argv[1]
 
 if len(sys.argv) > 2:
     port = int(sys.argv[2])
