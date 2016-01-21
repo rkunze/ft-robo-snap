@@ -351,6 +351,7 @@ def _disconnect_controller(message, cause):
     for connection in _active_connections.viewvalues():
         connection.answer(error)
     _controller = None
+    return True
 
 
 def _connect_controller():
