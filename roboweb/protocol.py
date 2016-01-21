@@ -26,7 +26,7 @@ class Request(Message):
         :raises: ValueError if *data* does not represent a RoboWeb protocol Request message
         """
         if not data:
-            return Status({})
+            return GenericStatusReport(True)
         elif 'request' in data:
             name = data['request'].lower()
             if name in _requests_by_name:
@@ -43,7 +43,7 @@ class Request(Message):
         pass
 
 
-class Status(Request):
+class Report(Request):
     """
     Request the current status from the controller.
 
@@ -56,10 +56,11 @@ class Status(Request):
     The reply is either a Status with all entries requested in ``report`` or an Error
     """
 
-    def execute(self):
-        if 'report' not in self.data:
-            return Status();
-        requested_reports = frozenset(self['report'])
+    def execute(self, connection):
+        if 'include' not in self.data:
+            return GenericStatusReport(True);
+        includes = self.data['include']
+        requested_reports = frozenset([includes] if isinstance(includes, str) else includes)
         reports = {}
         controller = _connect_controller()
         if 'controller' in requested_reports:
@@ -151,6 +152,130 @@ class Configure(Request):
             return Status(controller=controller_state, configuration=connection.config.report())
 
 
+class Out(Request):
+    """
+    Change settings for one or more motors/outputs
+
+    a set outputs request may include the entries
+
+    ``O1`` .. ``O8``
+        Settings for output pins configured as individual outputs. The value for each entry is the PWM setting for this
+        entry as an integer in the range 0 .. 512. 0 means "off".
+    ``M1`` .. ``M4``
+        Settings for output pins that are currently configured as motors. Each entry may contain the sub entries
+
+        * ``speed``: The motor speed (or more correctly, the PWM setting). Values are integers,
+          allowed range is -512 .. 512. A value of 0 means "stop". Negative values change the motor direction.
+          Out-of-range values will be automatically clamped to the nearest acceptable value.
+        * ``steps``: The motor will be stopped after ``steps`` counter ticks on the "fast counter" input
+          with the same number as the motor (e.g. *C1* for motor *M1*). Allowed values are non-negative
+          integers, a value of 0 (or omitting the ``steps`` parameter) means "run until stopped by another request"
+        * ``syncto``: Synchronizes the motor to another motor, i.e. makes both motors run at the same speed and for
+          the same number of steps. Allowed values are all motor ids, synchronizing a motor to itself has no effect.
+
+        alternatively, the value of a motor setting may be an int in the range of -512 .. 512 - this is equivalent
+        to ``{ "speed" : ... }``
+
+    Example: With two encoder motors connected to M1/C1 and M2/C2 respectively, and a LED connected to O7, the request::
+
+    { "request" : "out", "M1": { "speed" : -512, "steps" : 100, "syncto" : "M2" }, "O7": 255}
+
+    will switch the LED on at (roughly) half power, synchronize motor M2 to M1, and run both motors
+    backwards at full speed for 100 encoder steps.
+
+    If some of the requested configuration changes cannot be executed because the corresponding output/motor
+    is not configured for this connection), the controller will reply with error messages of the form::
+
+    { "reply": "error", "message" : "set failed", "details" : { "id" : "M1", "reason" : "not configured" }}
+
+    There will be one reply for every unconfigured output.
+
+    For successful output settings, the controller will only send status replies if the client has already requested
+    to be notified on status changes for the corresponding output/motor.
+    """
+
+    def _set_motor(self, motor, connection, controller):
+        idx = connection.config.get(motor, None)
+        if idx is None:
+            connection.answer(Error('set failed', { 'id': motor, 'reason' : 'not configured'}))
+        else:
+            values = self.data[motor]
+            if isinstance(values, dict):
+                speed = values.get('speed')
+                syncto_id = values.get('syncto')
+                syncto = connection.config.get(syncto_id)
+                steps = values.get('steps')
+                if not (isinstance(speed, int) and isinstance(steps, int)):
+                    return Error('set failed', {'id': motor, 'reason': 'invalid data: %s' % repr(values)})
+                if syncto is None and syncto_id is not None:
+                    return Error('set failed', {'id': motor, 'reason': 'invalid syncto target: %s' % repr(syncto)})
+            elif isinstance(values, int):
+                speed = values
+                syncto = None
+                steps = None
+            else:
+                return Error('set failed', {'id': motor, 'reason': 'invalid data: %s' % repr(values)})
+            speed = _clamp(speed, -512, 512)
+            steps = _clamp(steps, 0, 65535)
+            if syncto is not None:
+                controller.setMotorSyncMaster(idx, syncto+1)
+                controller.setMotorSyncMaster(syncto, idx+1)
+            if steps is not None:
+                controller.setMotorDistance(idx, steps)
+            if (syncto is not None) or (steps is not None):
+                controller.incrMotorCmdId(idx)
+            if speed >= 0:
+                 controller.setPwm(idx*2, speed)
+                 controller.setPwm(idx*2+1, 0)
+            else:
+                 controller.setPwm(idx*2, 0)
+                 controller.setPwm(idx*2+1, -speed)
+        return None
+
+    def _set_output(self, output, connection, controller):
+        idx = connection.config.get(output)
+        if idx is None:
+            return Error('set failed', { 'id': output, 'reason' : 'not configured'})
+        value = self.data[output]
+        if not isinstance(value, int):
+            return Error('set failed', {'id': output, 'reason': 'invalid data: %s' % repr(value)})
+        controller.setPwm(idx, _clamp(value, 0, 512))
+        return None
+
+    def execute(self, connection):
+        controller = _connect_controller()
+        if not (isinstance(controller, ftTXT) and controller._is_online):
+            return controller if isinstance(controller, Error) else Error('set failed', 'controller is not online')
+        controller.SyncDataBegin()
+        for motor in IOConf.__motor_pin_names__:
+            if motor in self.data:
+                error = self._set_motor(motor, connection, controller)
+                if error is not None:
+                    connection.answer(error)
+        for output in IOConf.__output_pin_names__:
+            if output in self.data:
+                error = self._set_output(output, connection, controller)
+                if error is not None:
+                    connection.answer(error)
+        controller.SyncDataEnd()
+
+
+class Off(Request):
+    """
+    Set all outputs to "off".
+
+    Sets all outputs to 0 - even those outputs that are not configured for this connection and may be in use by another
+    client connected to the controller.
+
+    This request is intended as an emergency off switch. For normal usage, it is recommended to use a standard "out"
+    request instead.
+    """
+    def execute(self, connection):
+        controller = _connect_controller()
+        if not (isinstance(controller, ftTXT) and controller._is_online):
+            return controller if isinstance(controller, Error) else Error('set all to "off" failed', 'controller is not online')
+        controller.stopAll()
+
 class Reply(Message, dict):
     """Base class for RoboWeb protocol replies from the controller"""
 
@@ -212,12 +337,13 @@ class Status(Reply):
     def __init__(self, **kwargs):
         super(Status, self).__init__(reply='status', **kwargs)
 
+
 class GenericStatusReport(Status):
     """A generic status report with default settings."""
 
     def __init__(self, verbose=False):
         super(GenericStatusReport, self).__init__(
-            controller=_controller_state(_controller, full_report=verbose)
+                controller=_controller_state(_controller, full_report=verbose)
         )
 
 
@@ -247,10 +373,19 @@ class IOConf(dict):
     __input_values__ = frozenset(__input_values_map__.viewkeys())
     __output_values__ = frozenset(__output_values_map__.viewkeys())
     __output_keys__ = ['M1/O1,O2', 'M2/O3,O4', 'M3/O5,O6', 'M4/O7,O8']
+    __output_pin_names__ = ['O' + str(i + 1) for i in range(8)]
+    __motor_pin_names__ = ['M' + str(i + 1) for i in range(4)]
     __input_keys__ = ['I' + str(i + 1) for i in range(8)]
 
     def __init__(self, other=None):
         super(IOConf, self).__init__(self.__check_values__(other))
+        for i in range(0, len(IOConf.__output_keys__)):
+            v = self.get(self.__output_keys__[i], None)
+            if v == 'motor':
+                self['M%i' % (i + 1)] = i
+            elif v == 'output':
+                self['O%i' % (2 * i + 1)] = 2 * i
+                self['O%i' % (2 * i + 2)] = 2 * i + 1
 
     @staticmethod
     def __check_values__(data):
@@ -286,20 +421,18 @@ class IOConf(dict):
         super(IOConf, self).update({k: (v if v != 'unused' else self[k]) for (k, v) in other.viewitems()})
 
     def report(self):
-        report = {k: v for (k, v) in self.viewitems() if v != 'unused' and k in self.__input_keys__}
-        for i in range(0, len(self.__output_keys__)):
-            v = self.get(self.__output_keys__[i], None)
-            if v == 'motor':
-                report['M%i' % (i + 1)] = 'active'
-            elif v == 'output':
-                report['O%i' % (2 * i + 1)] = 'active'
-                report['O%i' % (2 * i + 2)] = 'active'
+        report = {k: v for (k, v) in self.viewitems() if v != 'unused' and k in IOConf.__input_keys__}
+        report.update({k: 'active' for k in IOConf.__output_pin_names__ if k in self})
+        report.update({k: 'active' for k in IOConf.__motor_pin_names__ if k in self})
         return report
 
     def apply(self, controller):
         controller.setConfig(self.ftTXT_output_conf(), self.ftTXT_input_conf())
         if controller._is_online:
             controller.updateConfig()
+
+    def output_idx(self, key):
+        return self['__active_outputs__'].get(key, None)
 
 
 class Connection:
@@ -340,6 +473,8 @@ _requests_by_name = {}
 _global_io_conf = IOConf()
 _controller = None
 
+def _clamp(value, min, max):
+    return value if min <= value <= max else min if value < min else max
 
 def _controller_connected():
     return _controller is not None
@@ -364,11 +499,13 @@ def _connect_controller():
         _global_io_conf.apply(_controller)
     return _controller
 
+
 def _controller_state(controller, full_report=False):
-    result = {'state': 'disconnected' if isinstance(controller, Error) or controller is None else 'connected'}
+    connected = not (isinstance(controller, Error) or (controller is None))
+    result = {'state': 'connected' if connected else 'disconnected'}
     if isinstance(controller, ftTXT):
         result['mode'] = 'online' if controller._is_online else 'offline'
-        if full_report:
+        if full_report and connected:
             name_raw, version_raw = _controller.queryStatus()
             result['name'] = name_raw.strip(u'\u0000')
             version = str((version_raw >> 24) & 0xff)
