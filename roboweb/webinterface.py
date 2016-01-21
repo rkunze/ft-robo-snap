@@ -164,7 +164,7 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
 def msg_from_query_string(message):
     parsed = {}
     for name, value in urlparse.parse_qsl(message):
-        value = _to_base_type(value)
+        value = _parse_http_param_value(value)
         if name in parsed:
             existing = parsed[name]
             if isinstance(existing, list):
@@ -176,7 +176,9 @@ def msg_from_query_string(message):
     return protocol.Request.from_dict(parsed)
 
 
-def _to_base_type(value):
+def _parse_http_param_value(value):
+    if value[0] in ['[', '{']:
+        return json.loads(value)
     try:
         return int(value)
     except ValueError:
