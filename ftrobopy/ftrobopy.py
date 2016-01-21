@@ -22,6 +22,11 @@ __email__       = "stuehn@mailbox.org"
 __status__      = "alpha"
 __date__        = "09/14/2015"
 
+
+def default_error_handler(message, exception):
+  print message
+  return False
+
 class ftTXT(object):
   """
     Basisklasse zum fischertechnik TXT Computer.
@@ -52,7 +57,7 @@ class ftTXT(object):
   C_OUTPUT     = 0
   C_MOTOR      = 1
 
-  def __init__(self, host, port):
+  def __init__(self, host, port, on_error=default_error_handler):
     """
       Initialisierung der ftTXT Klasse:
 
@@ -71,6 +76,10 @@ class ftTXT(object):
       :param port: Portnummer (normalerweise 65000)
       :type port: integer
 
+      :param on_error: Errorhandler fuer Fehler bei der Kommunikation mit dem Controller (optional)
+      :type port: function(str, Exception) -> bool
+
+
       :return: Leer
 
       Anwedungsbeispiel:
@@ -80,12 +89,10 @@ class ftTXT(object):
     """
     self._host=host
     self._port=port
+    self.handle_error=on_error
     self._sock=socket.socket()
-    try:
-      self._sock.connect((self._host, self._port))
-    except:
-      print 'Connection to ', host, ':',port,' failed.'
-      sys.exit()
+    self._sock.settimeout(5)
+    self._sock.connect((self._host, self._port))
     self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     self._sock.setblocking(1)
     self._exchange_data_lock = threading.RLock()
@@ -134,7 +141,7 @@ class ftTXT(object):
     self._current_motor_cmd_id   = [0,0,0,0]
     self._current_sound_cmd_id   = 0
     self._current_ir             = range(26)
-    self._exchange_data_lock.release() 
+    self._exchange_data_lock.release()
 
   def queryStatus(self):
     """
@@ -161,7 +168,7 @@ class ftTXT(object):
       response_id, m_devicename, m_version = struct.unpack(fstr, data)
     else:
       m_devicename = ''
-      m_version    = ''
+      m_version    = 0
     if response_id != m_resp_id:
       print 'WARNING: ResponseID ', hex(response_id),'of queryStatus command does not match'
     self._m_devicename = m_devicename
@@ -417,7 +424,7 @@ class ftTXT(object):
       print 'WARNING: ResponseID ', hex(response_id),' of exchangeData command does not match'
     else:
       m_exchange_ok = True
-    self._exchange_data_lock.acquire()
+    self._exchange_data.lock_acquire()
     self._current_input          = response[1:9]
     self._current_counter        = response[9:13]
     self._current_counter_value  = response[13:17]
@@ -1163,8 +1170,14 @@ class ftTXTexchange(threading.Thread):
       self._txt._exchange_data_lock.release()
       buf = struct.pack('<I8h4h4h4h4hHHHbb', *fields)
       self._txt._socket_lock.acquire()
-      res = self._txt._sock.send(buf)
-      data = self._txt._sock.recv(512)
+      try:
+        res = self._txt._sock.send(buf)
+        data = self._txt._sock.recv(512)
+      except Exception as err:
+        if not self._txt.handle_error('', err):
+          print 'Connection to TXT aborted'
+        self._txt_stop_event.set()
+        return
       self._txt._update_timer = time.time()
       self._txt._socket_lock.release()
       fstr    = '<I8h4h4h4h4hH4bB4bB4bB4bB4bBb'
@@ -1172,14 +1185,14 @@ class ftTXTexchange(threading.Thread):
       if len(data) == struct.calcsize(fstr):
         response = struct.unpack(fstr, data)
       else:
-        print 'Received data size (', len(data),') does not match length of format string (',struct.calcsize(fstr),')'
-        print 'Connection to TXT aborted'
+        if not self._txt.handle_error('Received data size (', len(data),') does not match length of format string (',struct.calcsize(fstr),')'):
+          print 'Connection to TXT aborted'
         self._txt_stop_event.set()
         return
       response_id = response[0]
       if response_id != m_resp_id:
-        print 'ResponseID ', hex(response_id),' of exchangeData command does not match'
-        print 'Connection to TXT aborted'
+        if not self._txt.handle_error('ResponseID ', hex(response_id),' of exchangeData command does not match'):
+          print 'Connection to TXT aborted'
         self._txt_stop_event.set()
         return
       self._txt._exchange_data_lock.acquire()
