@@ -139,14 +139,10 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
             self.process_robotxt_message(parsed_message)
         elif parsed_message is not None:
             self.robotxt_connection.send(parsed_message)
-        # In HTTP mode, we always want to send back a reply.
-        # If we have none queued up, wait a bit for a reply from the controller and push
-        # a generic reply if we still have none after the wait
-        max_wait = time.time() + 5
+        # If we have no reply queued up, wait a bit for a reply from the controller
+        max_wait = time.time() + 0.1
         while not (self.replies or time.time() >= max_wait):
-            time.sleep(0.1)
-        if not self.replies:
-            self.process_robotxt_message(protocol.GenericStatusReport(verbose=parsed_message is None))
+            time.sleep(0.01)
         # Cannot simply use '\n'.join(self.replies) and then clear the queue
         # because this would introduce a race condition
         data = ''
