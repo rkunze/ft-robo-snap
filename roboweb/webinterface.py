@@ -1,15 +1,17 @@
 """ A combined HTTP and WebSocket handler realizing the RoboWeb interface"""
+import collections
 import json
 import urlparse
 from BaseHTTPServer import BaseHTTPRequestHandler
 from SocketServer import BaseRequestHandler
+
+import time
 
 from roboweb import protocol
 from SimpleHTTPServer import SimpleHTTPRequestHandler
 
 from httpwebsockethandler.HTTPWebSocketsHandler import HTTPWebSocketsHandler
 
-robotxt_address = 'localhost'
 
 def is_static_path(path):
     return (path == '/') or (path == '/index.html') or path.startswith('/snap/') or path.startswith('/ui/')
@@ -23,7 +25,7 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
     """
     Handles HTTP and WebSocket requests from clients.
 
-    This handler realizes both the actual web interface to the controller 
+    This handler realizes both the actual web interface to the _controller
     software (either as a WebSocket connection or via HTTP POST/GET) and
     serves static files from selected subdirectories (Only HTTP GET/HEAD 
     allowed).
@@ -40,14 +42,14 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
         additional pages and resources (images, style sheets etc.) for the web interface
     
     The actual web interface is located at ``/control`` and allows communication
-    with the controller using the RoboWeb protocol (see protocol.py for details).
+    with the _controller using the RoboWeb protocol (see protocol.py for details).
     
     Messages can be exchanged either by doing a WebSocket handshake on the
     ``/control`` URL and sending/receiving RoboWeb protocol messages encoded in
     JSON, or by sending commands encoded as HTTP parameters via GET/POST.
     
     WebSocket is the preferred method for communication because it has
-    less overhead than HTTP and allows the controller to actively push messages
+    less overhead than HTTP and allows the _controller to actively push messages
     to the client (e.g to signal input changes), as opposed to HTML where the
     current state must be polled by the client.
     """
@@ -55,10 +57,15 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
     server_version = "RoboWeb/0.1"
     protocol_version = "HTTP/1.1"
 
+    # noinspection PyAttributeOutsideInit
     def setup(self):
         HTTPWebSocketsHandler.setup(self)
-        self.robotxt_connection = protocol.connect(self.client_address, robotxt_address)
-
+        # TODO: get connection ID from Cookie/URL path/... to allow for more than one connection per client
+        self.replies = collections.deque()
+        self.robotxt_connection = protocol.connect(
+                connection_id=self.client_address[0],
+                reply_callback=self.process_robotxt_message
+        )
 
     def list_directory(self, path):
         # we do not allow directory listing.
@@ -70,11 +77,10 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
         elif is_control_path(self.path):
             if self.headers.get("Upgrade", None) == "websocket":
                 self._handshake()
-                # This handler is in WebSocket mode now.
                 # do_GET only returns after client close or socket error.
                 self._read_messages()
             else:
-                self._handle_roboweb_message_http(self.path[9:], False)
+                self._handle_roboweb_request_http(self.path[9:], 'application/x-www-form-urlencoded')
         else:
             self.send_error(404)
 
@@ -89,45 +95,73 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
             content_type = self.headers.getheader('content-type')
             length = int(self.headers.getheader('content-length'))
             message = self.rfile.read(length)
-            if content_type == 'application/json':
-                self._handle_roboweb_message_http(message, True)
-            elif content_type == 'application/x-www-form-urlencoded':
-                self._handle_roboweb_message_http(message, False)
+            if content_type in ['application/json', 'application/x-www-form-urlencoded']:
+                self._handle_roboweb_request_http(message, content_type)
             else:
                 self.send_error(415)
         else:
             self.send_error(405)
 
+    def process_robotxt_message(self, message):
+        self.replies.append(json.dumps(message, default=lambda o: repr(o)))
+        if self.connected:
+            while self.replies:
+                self.send_message(self.replies.popleft())
+        return True
+
+    def _parse_message(self, raw_message, content_type):
+        if not raw_message:
+            return None
+        try:
+            if content_type == 'application/json':
+                return json.loads(raw_message, None, None, protocol.Request.from_dict)
+            else:
+                return msg_from_query_string(raw_message)
+        except ValueError as err:
+            return protocol.Error('Failed to parse message %s as %s' % (raw_message, content_type), err)
+
     def on_ws_message(self, message):
-        pass
+        parsed_message = self._parse_message(message, 'application/json')
+        if isinstance(parsed_message, protocol.Error):
+            self.process_robotxt_message(parsed_message)
+        elif parsed_message is not None:
+            self.robotxt_connection.send(parsed_message)
 
     def on_ws_connected(self):
-        pass
+        self.process_robotxt_message(protocol.GenericStatusReport(verbose=True))
 
     def on_ws_closed(self):
         self.robotxt_connection.disconnect()
 
-    def _handle_roboweb_message_http(self, message, is_json = False):
-        try:
-            parsed = json.loads(message, None, None, protocol.Request.from_dict) if is_json else msg_from_query_string(message)
-            response = self.robotxt_connection.send(parsed)
-            if response is None:
-                # For HTTP, we always want a response, so we fake one
-                # if the message did not cause an immediate reply
-                response = dict(status = 'OK')
-        except ValueError as err:
-            response = protocol.Error(err.message)
-        except Exception as err:
-            self.send_error(500, "Lost connection to the controller: " + err.message)
-        data = json.dumps(response)
-        self.send_response(200) # Note: protocol errors are not encoded in HTTP status codes
-        self.send_header('Content-Type', 'application/json')
+    def _handle_roboweb_request_http(self, message, content_type):
+        parsed_message = self._parse_message(message, content_type)
+        if isinstance(parsed_message, protocol.Error):
+            self.process_robotxt_message(parsed_message)
+        elif parsed_message is not None:
+            self.robotxt_connection.send(parsed_message)
+        # In HTTP mode, we always want to send back a reply.
+        # If we have none queued up, wait a bit for a reply from the controller and push
+        # a generic reply if we still have none after the wait
+        max_wait = time.time() + 5
+        while not (self.replies or time.time() >= max_wait):
+            time.sleep(0.1)
+        if not self.replies:
+            self.process_robotxt_message(protocol.GenericStatusReport(verbose=parsed_message is None))
+        # Cannot simply use '\n'.join(self.replies) and then clear the queue
+        # because this would introduce a race condition
+        data = ''
+        while self.replies:
+            data += self.replies.pop() + '\n'
+        self.send_response(200)  # Note: protocol errors are not encoded in HTTP status codes
+        self.send_header('Content-Type', 'application/x-json-stream')
         self.send_header('Content-Length', len(data))
         self.end_headers()
         self.wfile.write(data)
+        if self.close_connection:
+            self.robotxt_connection.disconnect()
 
     def send_error(self, code, message=None):
-        self.robotxt_connection.disconnect();
+        self.robotxt_connection.disconnect()
         BaseHTTPRequestHandler.send_error(self, code, message)
 
 
@@ -144,6 +178,7 @@ def msg_from_query_string(message):
         else:
             parsed[name] = value
     return protocol.Request.from_dict(parsed)
+
 
 def _to_base_type(value):
     try:
