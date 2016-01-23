@@ -27,6 +27,11 @@ def default_error_handler(message, exception):
   print message
   return False
 
+
+def default_data_handler(ftTXT):
+  pass
+
+
 class ftTXT(object):
   """
     Basisklasse zum fischertechnik TXT Computer.
@@ -57,7 +62,7 @@ class ftTXT(object):
   C_OUTPUT     = 0
   C_MOTOR      = 1
 
-  def __init__(self, host, port, on_error=default_error_handler):
+  def __init__(self, host, port, on_error=default_error_handler, on_data=default_data_handler):
     """
       Initialisierung der ftTXT Klasse:
 
@@ -90,6 +95,7 @@ class ftTXT(object):
     self._host=host
     self._port=port
     self.handle_error=on_error
+    self.handle_data=on_data
     self._sock=socket.socket()
     self._sock.settimeout(5)
     self._sock.connect((self._host, self._port))
@@ -1203,6 +1209,7 @@ class ftTXTexchange(threading.Thread):
       self._txt._current_motor_cmd_id   = response[21:25]
       self._txt._current_sound_cmd_id   = response[25]
       self._txt._current_ir             = response[26:52]
+      self._txt.handle_data(self._txt)
       self._txt._exchange_data_lock.release()
     return
 
