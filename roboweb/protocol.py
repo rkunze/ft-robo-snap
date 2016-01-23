@@ -493,7 +493,7 @@ def _connect_controller():
     global _controller
     if _controller is None:
         try:
-            _controller = ftTXT(robotxt_address, 65000, _disconnect_controller)
+            _controller = ftTXT(robotxt_address, 65000, _disconnect_controller, _on_controller_data)
         except Exception as err:
             return Error("Connection to TXT controller at %s:65000 failed", err)
         _global_io_conf.apply(_controller)
@@ -516,6 +516,12 @@ def _controller_state(controller, full_report=False):
     elif isinstance(controller, Error):
         result['details'] = controller
     return result
+
+
+def _on_controller_data(controller):
+    current_state = InputState(controller)
+    for connection in _active_connections.viewvalues():
+        connection.report_input_state(current_state)
 
 
 def connect(reply_callback, connection_id=None):
