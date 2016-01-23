@@ -101,14 +101,16 @@ class ftTXT(object):
     self._sock.connect((self._host, self._port))
     self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     self._sock.setblocking(1)
+    self._txt_stop_event = threading.Event()
+    self._txt_stop_event.set()
     self._exchange_data_lock = threading.RLock()
     self._camera_data_lock   = threading.Lock()
     self._socket_lock  = threading.Lock()
+    self._txt_thread = None
     self._update_timer  = time.time()
     self._sound_timer   = self._update_timer
     self._sound_length  = 0
     self._camera_already_running = False
-    self._is_online = False
     self._m_devicename = ''
     self._m_version    = ''
     self._config_id            = 0
@@ -148,6 +150,9 @@ class ftTXT(object):
     self._current_sound_cmd_id   = 0
     self._current_ir             = range(26)
     self._exchange_data_lock.release()
+
+  def isOnline(self):
+    return (not self._txt_stop_event.isSet()) and (self._txt_thread is not None)
 
   def queryStatus(self):
     """
@@ -217,26 +222,28 @@ class ftTXT(object):
 
        >>> txt.startOnline()
     """
-    if self._is_online:
+    if self._txt_stop_event.isSet():
+      self._txt_stop_event.clear()
+    else:
       return
-    self._is_online = True
-    m_id       = 0x163FF61D
-    m_resp_id  = 0xCA689F75
-    buf        = struct.pack('<I64s', m_id,'')
-    self._socket_lock.acquire()
-    res        = self._sock.send(buf)
-    data       = self._sock.recv(512)
-    self._socket_lock.release()
-    fstr       = '<I'
-    response_id = 0
-    if len(data) == struct.calcsize(fstr):
-      response_id, = struct.unpack(fstr, data)
-    if response_id != m_resp_id:
-      print 'WARNING: ResponseID ', hex(response_id),' of startOnline command does not match'
-    self._txt_stop_event = threading.Event()
-    self._txt_thread = ftTXTexchange(txt=self, sleep_between_updates=0.05, stop_event=self._txt_stop_event)
-    self._txt_thread.setDaemon(True)
-    self._txt_thread.start()
+    if self._txt_thread is None:
+      m_id       = 0x163FF61D
+      m_resp_id  = 0xCA689F75
+      buf        = struct.pack('<I64s', m_id,'')
+      self._socket_lock.acquire()
+      res        = self._sock.send(buf)
+      data       = self._sock.recv(512)
+      self._socket_lock.release()
+      fstr       = '<I'
+      response_id = 0
+      if len(data) == struct.calcsize(fstr):
+        response_id, = struct.unpack(fstr, data)
+      if response_id != m_resp_id:
+        self.handle_error('WARNING: ResponseID %s of startOnline command does not match' % hex(response_id))
+      else:
+        self._txt_thread = ftTXTexchange(txt=self, sleep_between_updates=0.05, stop_event=self._txt_stop_event)
+        self._txt_thread.setDaemon(True)
+        self._txt_thread.start()
     return None
 
   def stopOnline(self):
@@ -249,7 +256,7 @@ class ftTXT(object):
 
        >>> txt.stopOnline()
     """
-    if not self._is_online:
+    if not self.isOnline():
       return
     self._txt_stop_event.set()
     m_id       = 0x9BE5082C
@@ -264,8 +271,8 @@ class ftTXT(object):
     if len(data) == struct.calcsize(fstr):
       response_id, = struct.unpack(fstr, data)
     if response_id != m_resp_id:
-      print 'WARNING: ResponseID ', hex(response_id), ' of stopOnline command does not match'
-    self._is_online = False;
+      self.handle_error('WARNING: ResponseID %s of stopOnline command does not match' % hex(response_id), None)
+    self._txt_thread = None
     return None
 
   def setConfig(self, M, I):
@@ -366,6 +373,9 @@ class ftTXT(object):
        >>> txt.setConfig(M, I)
        >>> txt.updateConfig()
     """
+    if not self.isOnline():
+      self.handle_error("Controller must be online before updateConfig() is called")
+      return
     m_id       = 0x060EF27E
     m_resp_id  = 0x9689A68C
     self._config_id += 1
@@ -387,7 +397,8 @@ class ftTXT(object):
     if len(data) == struct.calcsize(fstr):
       response_id, = struct.unpack(fstr, data)
     if response_id != m_resp_id:
-      print 'WARNING: ResponseID ', hex(response_id),' of updateConfig command does not match'
+      self.handle_error('WARNING: ResponseID %s of updateConfig command does not match' % hex(response_id), None)
+      self._txt_stop_event.set()  # Stop the data exchange thread if we were online
     return None
 
   def exchangeData(self):
@@ -1180,8 +1191,7 @@ class ftTXTexchange(threading.Thread):
         res = self._txt._sock.send(buf)
         data = self._txt._sock.recv(512)
       except Exception as err:
-        if not self._txt.handle_error('', err):
-          print 'Connection to TXT aborted'
+        self._txt.handle_error('Network error', err)
         self._txt_stop_event.set()
         return
       self._txt._update_timer = time.time()
@@ -1191,14 +1201,12 @@ class ftTXTexchange(threading.Thread):
       if len(data) == struct.calcsize(fstr):
         response = struct.unpack(fstr, data)
       else:
-        if not self._txt.handle_error('Received data size (', len(data),') does not match length of format string (',struct.calcsize(fstr),')'):
-          print 'Connection to TXT aborted'
+        self._txt.handle_error('Received data size (%i) does not match length of format string (%i)' %(len(data), struct.calcsize(fstr)))
         self._txt_stop_event.set()
         return
       response_id = response[0]
       if response_id != m_resp_id:
-        if not self._txt.handle_error('ResponseID ', hex(response_id),' of exchangeData command does not match'):
-          print 'Connection to TXT aborted'
+        self._txt.handle_error('ResponseID %s of exchangeData command does not match', hex(response_id))
         self._txt_stop_event.set()
         return
       self._txt._exchange_data_lock.acquire()
