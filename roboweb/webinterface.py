@@ -2,6 +2,7 @@
 import collections
 import json
 import urlparse
+import os.path
 from BaseHTTPServer import BaseHTTPRequestHandler
 from SocketServer import BaseRequestHandler
 
@@ -12,9 +13,24 @@ from SimpleHTTPServer import SimpleHTTPRequestHandler
 
 from httpwebsockethandler.HTTPWebSocketsHandler import HTTPWebSocketsHandler
 
+STATIC_FILES = ['/', '/index.html', '/favicon.ico']
+STATIC_PREFIXES = [
+    '/ide/'
+]
+STATIC_OVERLAYS = {
+    '/ide/': '/snap/'
+}
+
 
 def is_static_path(path):
-    return (path == '/') or (path == '/index.html') or path.startswith('/snap/') or path.startswith('/ui/')
+    return path in STATIC_FILES or static_prefix_of(path) is not None
+
+
+def static_prefix_of(path):
+    for prefix in STATIC_PREFIXES:
+        if path.startswith(prefix):
+            return prefix
+    return None
 
 
 def is_control_path(path):
@@ -64,8 +80,8 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
         self.replies = collections.deque()
         # noinspection PyTypeChecker
         self.robotxt_connection = protocol.connect(
-            connection_id=self.client_address[0],
-            reply_callback=self.process_robotxt_message
+                connection_id=self.client_address[0],
+                reply_callback=self.process_robotxt_message
         )
 
     def list_directory(self, path):
@@ -74,6 +90,8 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
 
     def do_GET(self):
         if is_static_path(self.path):
+            # noinspection PyAttributeOutsideInit
+            self.path = self._translate_overlay_path(self.path)
             SimpleHTTPRequestHandler.do_GET(self)
         elif is_control_path(self.path):
             if self.headers.get("Upgrade", None) == "websocket":
@@ -87,6 +105,8 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
 
     def do_HEAD(self):
         if is_static_path(self.path):
+            # noinspection PyAttributeOutsideInit
+            self.path = self._translate_overlay_path(self.path)
             SimpleHTTPRequestHandler.do_HEAD(self)
         else:
             self.send_error(405)
@@ -130,6 +150,21 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
 
     def on_ws_closed(self):
         self.robotxt_connection.disconnect()
+
+    def _translate_overlay_path(self, path):
+        overlay_prefix = static_prefix_of(path)
+        if overlay_prefix is None:
+            return path
+        base = STATIC_OVERLAYS.get(overlay_prefix, None)
+        if base is None:
+            return path
+
+        ospath = self.translate_path(path)
+        if os.path.isfile(ospath):
+            return path
+        else:
+            return base + path[len(overlay_prefix):]
+
 
     def _handle_roboweb_request_http(self, message):
         parsed_message = self._parse_message(message)
