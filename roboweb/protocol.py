@@ -4,6 +4,8 @@ import random
 
 import sys
 
+import time
+
 from ftrobopy import ftrobopy
 from ftrobopy.ftrobopy import ftTXT
 
@@ -63,10 +65,15 @@ class Report(Request):
         requested_reports = frozenset([includes] if isinstance(includes, str) else includes)
         reports = {}
         controller = _connect_controller()
-        if 'controller' in requested_reports:
+        if 'controller' in requested_reports or requested_reports == 'all':
             reports['controller'] = _controller_state(controller, full_report=True)
         if not isinstance(controller, Error):
-            pass  # TODO: Implement this
+            if requested_reports == 'all':
+                reports.update({name: getattr(connection, name).report()
+                                for name in ["configuration", "notify", "iostate"]})
+            else:
+                reports.update({name: getattr(connection, name).report() for name in requested_reports
+                                if name in ["configuration", "notify", "iostate"]})
         elif len(requested_reports) > (1 if 'controller' in requested_reports else 0):
             return Error("Controller not connected, cannot report status for %s" % ', '.join(requested_reports),
                          controller)
@@ -126,9 +133,9 @@ class Configure(Request):
             errors.append('Unsupported mode: %s' % self.data['mode'])
         if new_config is not None:
             if keep_old_config:
-                connection.config.merge(new_config)
+                connection.configuration.merge(new_config)
             else:
-                connection.config = new_config
+                connection.configuration = new_config
             for other_conn in _active_connections.viewvalues():
                 if other_conn != connection:
                     conflicts = other_conn.config.conflicts(new_config)
@@ -146,18 +153,57 @@ class Configure(Request):
                 if new_config is not None:
                     _global_io_conf.merge(new_config)
                     _global_io_conf.apply(controller)
-                controller_state = {'mode': 'online' if controller._is_online else 'offline'}
+                controller_state = {'mode': 'online' if controller.isOnline() else 'offline'}
             else:
                 controller_state = {'state': 'disconnected', 'details': controller}
-            return Status(controller=controller_state, configuration=connection.config.report())
+            return Status(controller=controller_state, configuration=connection.configuration.report())
 
 
-class Out(Request):
+class Notify(Request):
+    """
+    Subscribe to i/o state reports from the controller.
+
+    An i/o state report sunscription may include the entries
+
+    ``I1`` .. ``I8``
+        Request reports for an input pin. The value for each entry may be one of
+
+        * ``onchange``: Request a report each time the value of the input changes
+        * an number *n* >= 0: Request notifications every *n* seconds. Setting *n* = 0 is the same as "off"
+        * ``off``: Stop input notifications for this input
+
+    ``C1`` .. ``C4``:
+        Settings for a counter input pin. The value for each entry may be one of
+
+        * ``onchange``: Request a message each time the value of the counter changes
+        * ``off``: Stop notifications for this counter
+        * an integer *n* > 0: Request a notification every *n* counter steps. Setting *n* = 0 is the same as "off",
+        * setting *n* = 1 is the same as "onchange"
+
+    Whenever the trigger condition for one of the requested inputs is met, the controller sends
+    a status reply with an appropriate "iostate" section.
+
+    Example::
+
+    { "request" : "notify", "I1": "onchange", "I2" : 0.1, "C3": 1000 }
+
+    will trigger iostate status messages for I1 whenever the value of I1 changes, for I2 every 0.1 seconds and
+    for C3 when the counter reaches 1000.
+    """
+
+    def execute(self, connection):
+        connection.notify.merge(self.data)
+        return Status(notify=connection.notify.report())
+
+
+class Set(Request):
     """
     Change settings for one or more motors/outputs
 
     a set outputs request may include the entries
 
+    ``C1`` .. ``C8``
+        Resets the counters. The only allowed value is 0..
     ``O1`` .. ``O8``
         Settings for output pins configured as individual outputs. The value for each entry is the PWM setting for this
         entry as an integer in the range 0 .. 512. 0 means "off".
@@ -167,14 +213,22 @@ class Out(Request):
         * ``speed``: The motor speed (or more correctly, the PWM setting). Values are integers,
           allowed range is -512 .. 512. A value of 0 means "stop". Negative values change the motor direction.
           Out-of-range values will be automatically clamped to the nearest acceptable value.
-        * ``steps``: The motor will be stopped after ``steps`` counter ticks on the "fast counter" input
-          with the same number as the motor (e.g. *C1* for motor *M1*). Allowed values are non-negative
-          integers, a value of 0 (or omitting the ``steps`` parameter) means "run until stopped by another request"
+        * ``steps``: Configures the motor to stop after a ``steps`` counter ticks on the "fast counter" input
+          with the same number as the motor (e.g. *C1* for motor *M1*). Allowed values are either non-negative
+          integers or the special value "unbounded". A value of 0 means "stop immediately", and any value > 32767
+          is equivalent to "unbounded". If ``steps`` is "unbounded", the motor will run until stopped by another
+          command. If ``steps`` is omitted, the current setting for steps remains unchanged.
         * ``syncto``: Synchronizes the motor to another motor, i.e. makes both motors run at the same speed and for
-          the same number of steps. Allowed values are all motor ids, synchronizing a motor to itself has no effect.
+          the same number of steps. Allowed values are all motor ids. Synchronizing a motor to itself has no effect.
+          Note: ``syncto`` may only be specified if ``steps`` is specified as well, and the synchronization is reset
+          as soon as the motor(s) stop.
 
-        alternatively, the value of a motor setting may be an int in the range of -512 .. 512 - this is equivalent
-        to ``{ "speed" : ... }``
+        As a shorthand for the full notation, the value of a motor setting may be an int *s* in the range of
+        -512 .. 512. This is equivalent to ``{ "speed" : s, "steps": "unbounded" }`` if the
+        motor is currently stopped, and to ``{ "speed" : s }`` if the motor is currently running.
+
+        The controller will send a status reply with an "iostate" section containing an "M*x*" entry with
+        value "stopped" when the motor has stopped running.
 
     Example: With two encoder motors connected to M1/C1 and M2/C2 respectively, and a LED connected to O7, the request::
 
@@ -188,63 +242,82 @@ class Out(Request):
 
     { "reply": "error", "message" : "set failed", "details" : { "id" : "M1", "reason" : "not configured" }}
 
-    There will be one reply for every unconfigured output.
+    Each error is reported in a separate reply.
 
-    For successful output settings, the controller will only send status replies if the client has already requested
-    to be notified on status changes for the corresponding output/motor.
     """
 
     def _set_motor(self, motor, connection, controller):
-        idx = connection.config.get(motor, None)
+        idx = connection.configuration.get(motor, None)
         if idx is None:
-            connection.answer(Error('set failed', { 'id': motor, 'reason' : 'not configured'}))
+            connection.answer(Error('set failed', {'id': motor, 'reason': 'not configured'}))
         else:
             values = self.data[motor]
+            is_motor_finished = controller.getCurrentMotorCmdId(idx) == controller.getMotorCmdId(idx)
             if isinstance(values, dict):
                 speed = values.get('speed')
-                syncto_id = values.get('syncto')
-                syncto = connection.config.get(syncto_id)
-                steps = values.get('steps')
-                if not (isinstance(speed, int) and isinstance(steps, int)):
-                    return Error('set failed', {'id': motor, 'reason': 'invalid data: %s' % repr(values)})
+                syncto_id = values.get('syncto', None)
+                syncto = connection.configuration.get(syncto_id, None)
+                steps = values.get('steps', "unbounded" if is_motor_finished else None)
+                if not (isinstance(speed, int)):
+                    return Error('set failed', {'id': motor, 'reason': 'invalid data: %s' % values})
                 if syncto is None and syncto_id is not None:
                     return Error('set failed', {'id': motor, 'reason': 'invalid syncto target: %s' % repr(syncto)})
+                if syncto is not None and steps is None:
+                    return Error('set failed', {'id': motor, 'reason': '"syncto" requires "steps" to be specified : %s' % repr(syncto)})
             elif isinstance(values, int):
                 speed = values
                 syncto = None
-                steps = None
+                steps = "unbounded" if is_motor_finished else None
             else:
                 return Error('set failed', {'id': motor, 'reason': 'invalid data: %s' % repr(values)})
             speed = _clamp(speed, -512, 512)
-            steps = _clamp(steps, 0, 65535)
-            if syncto is not None:
-                controller.setMotorSyncMaster(idx, syncto+1)
-                controller.setMotorSyncMaster(syncto, idx+1)
-            if steps is not None:
-                controller.setMotorDistance(idx, steps)
-            if (syncto is not None) or (steps is not None):
-                controller.incrMotorCmdId(idx)
-            if speed >= 0:
-                 controller.setPwm(idx*2, speed)
-                 controller.setPwm(idx*2+1, 0)
+            stop_now = (speed == 0) or ((steps is not None) and (steps <= 0))
+            if stop_now:
+                controller.SyncDataBegin()
+                if not is_motor_finished:
+                    controller.setMotorDistance(idx, 0)
+                    controller.incrMotorCmdId(idx)
+                controller.setPwm(idx * 2, 0)
+                controller.setPwm(idx * 2 + 1, 0)
+                controller.SyncDataEnd()
+                return Status(iostate={motor: "stopped"})
             else:
-                 controller.setPwm(idx*2, 0)
-                 controller.setPwm(idx*2+1, -speed)
+                controller.SyncDataBegin()
+                if is_motor_finished or syncto is not None or steps is not None:
+                    controller.incrMotorCmdId(idx)
+                if syncto is not None:
+                    controller.setMotorSyncMaster(idx, syncto + 1)
+                    controller.setMotorSyncMaster(syncto, idx + 1)
+                if steps is not None:
+                    steps = 0 if steps is "unbounded" or steps > 32767 else steps
+                    controller.setMotorDistance(idx, steps)
+                if speed >= 0:
+                    controller.setPwm(idx * 2, speed)
+                    controller.setPwm(idx * 2 + 1, 0)
+                else:
+                    controller.setPwm(idx * 2, 0)
+                    controller.setPwm(idx * 2 + 1, -speed)
+                controller.SyncDataEnd()
         return None
 
     def _set_output(self, output, connection, controller):
-        idx = connection.config.get(output)
+        idx = connection.configuration.get(output)
         if idx is None:
-            return Error('set failed', { 'id': output, 'reason' : 'not configured'})
+            return Error('set failed', {'id': output, 'reason': 'not configured'})
         value = self.data[output]
         if not isinstance(value, int):
             return Error('set failed', {'id': output, 'reason': 'invalid data: %s' % repr(value)})
         controller.setPwm(idx, _clamp(value, 0, 512))
         return None
 
+    def _reset_counter(self, counter, connection, controller):
+        idx = int(counter[1:])-1
+        controller.incrCounterCmdId(idx)
+        return None
+
     def execute(self, connection):
         controller = _connect_controller()
-        if not (isinstance(controller, ftTXT) and controller._is_online):
+        if not (isinstance(controller, ftTXT) and controller.isOnline()):
             return controller if isinstance(controller, Error) else Error('set failed', 'controller is not online')
         controller.SyncDataBegin()
         for motor in IOConf.__motor_pin_names__:
@@ -255,6 +328,11 @@ class Out(Request):
         for output in IOConf.__output_pin_names__:
             if output in self.data:
                 error = self._set_output(output, connection, controller)
+                if error is not None:
+                    connection.answer(error)
+        for counter in IOConf.__counter_names__:
+            if counter in self.data:
+                error = self._reset_counter(counter, connection, controller)
                 if error is not None:
                     connection.answer(error)
         controller.SyncDataEnd()
@@ -270,11 +348,24 @@ class Off(Request):
     This request is intended as an emergency off switch. For normal usage, it is recommended to use a standard "out"
     request instead.
     """
+
     def execute(self, connection):
         controller = _connect_controller()
-        if not (isinstance(controller, ftTXT) and controller._is_online):
-            return controller if isinstance(controller, Error) else Error('set all to "off" failed', 'controller is not online')
+        if not (isinstance(controller, ftTXT) and controller.isOnline()):
+            return controller if isinstance(controller, Error) else Error('set all to "off" failed',
+                                                                          'controller is not online')
         controller.stopAll()
+
+
+class Get(Request):
+    """Get a full i/o status report for all inputs and counters."""
+
+    def execute(self, connection):
+        controller = _connect_controller()
+        if not (isinstance(controller, ftTXT) and controller.isOnline()):
+            return controller if isinstance(controller, Error) else Error('get failed', 'controller is not online')
+        return Status(iostate=connection.iostate.report())
+
 
 class Reply(Message, dict):
     """Base class for RoboWeb protocol replies from the controller"""
@@ -297,7 +388,9 @@ class Error(Reply):
     """
 
     def __init__(self, message, details=None):
-        super(Error, self).__init__(reply='error', error=message, details=details)
+        super(Error, self).__init__(reply='error', error=message)
+        if details:
+            self['details'] = details
 
 
 class Status(Reply):
@@ -350,7 +443,8 @@ class GenericStatusReport(Status):
 class ConfigError(ValueError):
     def __init__(self, message, details):
         super(ConfigError, self).__init__(message, details)
-        self.details = details
+        if details:
+            self.details = details
 
 
 class IOConf(dict):
@@ -375,22 +469,43 @@ class IOConf(dict):
     __output_keys__ = ['M1/O1,O2', 'M2/O3,O4', 'M3/O5,O6', 'M4/O7,O8']
     __output_pin_names__ = ['O' + str(i + 1) for i in range(8)]
     __motor_pin_names__ = ['M' + str(i + 1) for i in range(4)]
+    __counter_names__ = ['C' + str(i + 1) for i in range(4)]
     __input_keys__ = ['I' + str(i + 1) for i in range(8)]
 
     def __init__(self, other=None):
         super(IOConf, self).__init__(self.__check_values__(other))
+        self.__update_output_pins()
+
+    def __update_output_pins(self):
         for i in range(0, len(IOConf.__output_keys__)):
             v = self.get(self.__output_keys__[i], None)
+            m = IOConf.__motor_pin_names__[i]
+            o1 = IOConf.__output_pin_names__[2 * i]
+            o2 = IOConf.__output_pin_names__[2 * i + 1]
             if v == 'motor':
-                self['M%i' % (i + 1)] = i
+                self[m] = i
+                if o1 in self:
+                    del self[o1]
+                if o2 in self:
+                    del self[o2]
             elif v == 'output':
-                self['O%i' % (2 * i + 1)] = 2 * i
-                self['O%i' % (2 * i + 2)] = 2 * i + 1
+                self[o1] = 2 * i
+                self[o2] = 2 * i + 1
+                if m in self:
+                    del self[m]
+            else:
+                if m in self:
+                    del self[m]
+                if o1 in self:
+                    del self[o1]
+                if o2 in self:
+                    del self[o2]
+
 
     @staticmethod
     def __check_values__(data):
         if data is None:
-            data = {k: 'unused' for k in IOConf.__input_keys__ + IOConf.__output_keys__}
+            data = {}
         elif not (isinstance(data, dict)):
             raise TypeError("Not a dict: %s" % data)
         elif isinstance(data, IOConf):
@@ -418,7 +533,8 @@ class IOConf(dict):
     def merge(self, other):
         if not isinstance(other, IOConf):
             raise TypeError
-        super(IOConf, self).update({k: (v if v != 'unused' else self[k]) for (k, v) in other.viewitems()})
+        super(IOConf, self).update({k: v for k, v in other.viewitems()})
+        self.__update_output_pins()
 
     def report(self):
         report = {k: v for (k, v) in self.viewitems() if v != 'unused' and k in IOConf.__input_keys__}
@@ -428,11 +544,141 @@ class IOConf(dict):
 
     def apply(self, controller):
         controller.setConfig(self.ftTXT_output_conf(), self.ftTXT_input_conf())
-        if controller._is_online:
+        if controller.isOnline():
             controller.updateConfig()
 
     def output_idx(self, key):
         return self['__active_outputs__'].get(key, None)
+
+
+class IOStateEntry:
+    """Configuration and housekeeping data for a single input or counter"""
+
+    def __init__(self, name, trigger_step):
+        self.name = name
+        self.idx = int(name[1:]) - 1
+        self.is_counter = name[0] == 'C'
+        self.trigger_step = trigger_step
+        self.trigger = 0
+
+    def report_and_update(self, prev_iostate, curr_iostate):
+        if self.is_counter:
+            # Check for a counter reset and force a report if the counter has been reset.
+            # This does not detect the case of a counter reset at counter value 0,
+            # but since this is essentially a no-op we can ignore it here.
+            if curr_iostate.counters[self.idx] < prev_iostate.counters[self.idx]:
+                self.trigger = curr_iostate.counters[self.idx]
+            if self.trigger <= curr_iostate.counters[self.idx]:
+                # Since the reported value is almost always a bit bigger than the desired trigger step multiple,
+                # set the next trigger value to the next multiple of trigger_step instead of simply adding the step
+                self.trigger = (curr_iostate.counters[self.idx]/self.trigger_step + 1) * self.trigger_step
+                return curr_iostate.counters[self.idx]
+            else:
+                return None
+        elif self.trigger <= curr_iostate.timestamp:
+            # trigger_step is True means "trigger on every change"
+            if self.trigger_step is True:
+                self.trigger = curr_iostate.timestamp
+                if prev_iostate.inputs[self.idx] != curr_iostate.inputs[self.idx]:
+                    return curr_iostate.inputs[self.idx]
+                else:
+                    return None
+            else:
+                self.trigger = curr_iostate.timestamp + self.trigger_step
+                return curr_iostate.inputs[self.idx]
+        else:
+            return None
+
+    def config(self):
+        return "onchange" if self.trigger_step is True else self.trigger_step
+
+
+class IOStateConf:
+    """Configuration and housekeeping data for input reports"""
+
+    def __init__(self, data=None):
+        self._inputs = {}
+        self._next_input_check = None
+        self._counters = {}
+        if data:
+            self.merge(data)
+
+    def merge(self, data):
+        now = time.time()
+        for k, v in data.viewitems():
+            if k not in IOConf.__input_keys__ and k not in IOConf.__counter_names__:
+                continue
+            trigger = True if v == 'onchange' else (v if isinstance(v, (int, float)) and v > 0 else None)
+            if trigger is None:
+                if k in self._inputs:
+                    del self._inputs[k]
+                if k in self._counters:
+                    del self._counters[k]
+            else:
+                entry = IOStateEntry(k, trigger)
+                if entry.is_counter:
+                    self._counters[k] = entry
+                else:
+                    self._inputs[k] = entry
+        self._next_input_check = self._calculate_next_check_time(now)
+
+    def _calculate_next_check_time(self, now):
+        result = None
+        for entry in self._inputs.viewvalues():
+            if entry.trigger_step is True:
+                return now
+            elif result is None or entry.trigger < result:
+                result = entry.trigger
+        return result
+
+    def update_and_report_state(self, prev, curr, controller):
+        result = {}
+        # Motor state change indicates that a motor has stopped after a predefined number of steps, but only
+        # if a motor distance has been actually set. If the motor distance is 0, the change state means the
+        # motor is curently running and will keep running until stopped by another command. In this case,
+        # do not send the "motor stopped" report for this motor
+        if not prev.motor_state == curr.motor_state:
+            for i in range(4):
+                if prev.motor_state[i] != curr.motor_state[i] and controller.getMotorDistance(i) != 0:
+                    result["M%i" % (i + 1)] = "stopped"
+        if self._next_input_check is not None and self._next_input_check <= curr.timestamp:
+            for entry in self._inputs.viewvalues():
+                value = entry.report_and_update(prev, curr)
+                if value is not None:
+                    result[entry.name] = value
+            self._next_input_check = self._calculate_next_check_time(curr.timestamp)
+        elif self._counters:
+            for entry in self._counters.viewvalues():
+                value = entry.report_and_update(prev, curr)
+                if value is not None:
+                    result[entry.name] = value
+        return result
+
+    def report(self):
+        result = {}
+        result.update({e.name: e.config() for e in self._inputs.viewvalues()})
+        result.update({e.name: e.config() for e in self._counters.viewvalues()})
+        return result
+
+
+class InputState:
+    """Represents an input state of the controller"""
+
+    def __init__(self, controller=None):
+        self.timestamp = time.time()
+        if controller:
+            self.inputs = list(controller.getCurrentInput())
+            self.counters = list(controller.getCurrentCounterValue())
+            self.motor_state = list(controller.getCurrentMotorCmdId())
+        else:
+            self.inputs = [0] * 8
+            self.counters = [0] * 4
+            self.motor_state = [0] * 4
+
+    def report(self):
+        result = {"I%i" % (i + 1): self.inputs[i] for i in range(8)}
+        result.update({"C%i" % (i + 1): self.counters[i] for i in range(4)})
+        return result
 
 
 class Connection:
@@ -440,7 +686,9 @@ class Connection:
 
     def __init__(self, connection_id, reply_callback):
         self.id = connection_id
-        self.config = IOConf()
+        self.configuration = IOConf()
+        self.notify = IOStateConf()
+        self.iostate = InputState()
         self.answer = reply_callback
 
     def send(self, request):
@@ -457,9 +705,15 @@ class Connection:
         if reply is not None:
             self.answer(reply)
 
+    def report_input_state(self, new_state, controller):
+        result = self.notify.update_and_report_state(self.iostate, new_state, controller)
+        self.iostate = new_state
+        if result:
+            self.answer(Status(iostate=result))
+
     def disconnect(self):
         global _controller
-        _active_connections.pop(self.id, None)
+        connection = _active_connections.pop(self.id, None)
         if (not _active_connections) and _controller is not None:
             _controller.stopAll()
             _controller.stopCameraOnline()
@@ -473,14 +727,16 @@ _requests_by_name = {}
 _global_io_conf = IOConf()
 _controller = None
 
+
 def _clamp(value, min, max):
     return value if min <= value <= max else min if value < min else max
+
 
 def _controller_connected():
     return _controller is not None
 
 
-def _disconnect_controller(message, cause):
+def _disconnect_controller(message, cause=None):
     global _controller
     error = Error(message, cause)
     for connection in _active_connections.viewvalues():
@@ -495,7 +751,7 @@ def _connect_controller():
         try:
             _controller = ftTXT(robotxt_address, 65000, _disconnect_controller, _on_controller_data)
         except Exception as err:
-            return Error("Connection to TXT controller at %s:65000 failed", err)
+            return Error("Connection to TXT controller at %s:65000 failed" % robotxt_address, err)
         _global_io_conf.apply(_controller)
     return _controller
 
@@ -504,7 +760,7 @@ def _controller_state(controller, full_report=False):
     connected = not (isinstance(controller, Error) or (controller is None))
     result = {'state': 'connected' if connected else 'disconnected'}
     if isinstance(controller, ftTXT):
-        result['mode'] = 'online' if controller._is_online else 'offline'
+        result['mode'] = 'online' if controller.isOnline() else 'offline'
         if full_report and connected:
             name_raw, version_raw = _controller.queryStatus()
             result['name'] = name_raw.strip(u'\u0000')
@@ -521,7 +777,7 @@ def _controller_state(controller, full_report=False):
 def _on_controller_data(controller):
     current_state = InputState(controller)
     for connection in _active_connections.viewvalues():
-        connection.report_input_state(current_state)
+        connection.report_input_state(current_state, controller)
 
 
 def connect(reply_callback, connection_id=None):
