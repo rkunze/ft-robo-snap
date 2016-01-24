@@ -18,7 +18,7 @@ def is_static_path(path):
 
 
 def is_control_path(path):
-    return path == '/control' or path.startswith('/control?')
+    return path == '/control' or path.startswith('/control:')
 
 
 class WebInterfaceHandler(HTTPWebSocketsHandler):
@@ -62,9 +62,10 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
         HTTPWebSocketsHandler.setup(self)
         # TODO: get connection ID from Cookie/URL path/... to allow for more than one connection per client
         self.replies = collections.deque()
+        # noinspection PyTypeChecker
         self.robotxt_connection = protocol.connect(
-                connection_id=self.client_address[0],
-                reply_callback=self.process_robotxt_message
+            connection_id=self.client_address[0],
+            reply_callback=self.process_robotxt_message
         )
 
     def list_directory(self, path):
@@ -80,7 +81,7 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
                 # do_GET only returns after client close or socket error.
                 self._read_messages()
             else:
-                self._handle_roboweb_request_http(self.path[9:], 'application/x-www-form-urlencoded')
+                self._handle_roboweb_request_http(urlparse.unquote(self.path[9:]))
         else:
             self.send_error(404)
 
@@ -95,7 +96,7 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
             content_type = self.headers.getheader('content-type')
             length = int(self.headers.getheader('content-length'))
             message = self.rfile.read(length)
-            if content_type in ['application/json', 'application/x-www-form-urlencoded']:
+            if content_type == 'application/json':
                 self._handle_roboweb_request_http(message, content_type)
             else:
                 self.send_error(415)
@@ -109,19 +110,16 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
                 self.send_message(self.replies.popleft())
         return True
 
-    def _parse_message(self, raw_message, content_type):
+    def _parse_message(self, raw_message):
         if not raw_message:
             return None
         try:
-            if content_type == 'application/json':
-                return json.loads(raw_message, None, None, protocol.Request.from_dict)
-            else:
-                return msg_from_query_string(raw_message)
+            return protocol.Request.from_dict(json.loads(raw_message))
         except ValueError as err:
-            return protocol.Error('Failed to parse message %s as %s' % (raw_message, content_type), err)
+            return protocol.Error('Failed to parse message %s as JSON' % (raw_message), err)
 
     def on_ws_message(self, message):
-        parsed_message = self._parse_message(message, 'application/json')
+        parsed_message = self._parse_message(message)
         if isinstance(parsed_message, protocol.Error):
             self.process_robotxt_message(parsed_message)
         elif parsed_message is not None:
@@ -133,16 +131,16 @@ class WebInterfaceHandler(HTTPWebSocketsHandler):
     def on_ws_closed(self):
         self.robotxt_connection.disconnect()
 
-    def _handle_roboweb_request_http(self, message, content_type):
-        parsed_message = self._parse_message(message, content_type)
+    def _handle_roboweb_request_http(self, message):
+        parsed_message = self._parse_message(message)
         if isinstance(parsed_message, protocol.Error):
             self.process_robotxt_message(parsed_message)
         elif parsed_message is not None:
             self.robotxt_connection.send(parsed_message)
         # If we have no reply queued up, wait a bit for a reply from the controller
-        max_wait = time.time() + 0.1
+        max_wait = time.time() + 5
         while not (self.replies or time.time() >= max_wait):
-            time.sleep(0.01)
+            time.sleep(0.1)
         # Cannot simply use '\n'.join(self.replies) and then clear the queue
         # because this would introduce a race condition
         data = ''
