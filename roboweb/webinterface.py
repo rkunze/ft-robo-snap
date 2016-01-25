@@ -15,7 +15,7 @@ from httpwebsockethandler.HTTPWebSocketsHandler import HTTPWebSocketsHandler
 
 STATIC_FILES = ['/', '/index.html', '/favicon.ico']
 STATIC_PREFIXES = [
-    '/ide/'
+    '/ide/', '/snap/'
 ]
 STATIC_OVERLAYS = {
     '/ide/': '/snap/'
