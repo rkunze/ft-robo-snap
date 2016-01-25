@@ -1620,10 +1620,15 @@ SpriteMorph.prototype.colorFiltered = function (aColor) {
 // SpriteMorph block instantiation
 
 SpriteMorph.prototype.blockForSelector = function (selector, setDefaults) {
-    var migration, info, block, defaults, inputs, i;
+    var migration, info;
     migration = this.blockMigrations[selector];
     info = this.blocks[migration ? migration.selector : selector];
     if (!info) {return null; }
+    return this.blockFromInfo(selector, info, setDefaults, migration);
+}
+
+SpriteMorph.prototype.blockFromInfo = function(selector, info, setDefaults, migration) {
+    var block, defaults, inputs, i;
     block = info.type === 'command' ? new CommandBlockMorph()
         : info.type === 'hat' ? new HatBlockMorph()
             : info.type === 'ring' ? new RingMorph()
