@@ -13,13 +13,13 @@
 /*
    global
    SpriteMorph, StageMorph, SnapTranslator, WorldMorph, IDE_Morph,
-   SyntaxElementMorph, TextMorph, requestAnimationFrame, localize,
-   InputSlotMorph
+   SyntaxElementMorph, requestAnimationFrame, MultiArgMorph,
+   InputSlotMorph, SymbolMorph, newCanvas, Costume, Point, StringMorph
 */
 
 
 function FTRoboSnap() {
-    this.dict = {}
+    this.dict = {};
 
     function blockFromInfo(info) {
         if (StageMorph.prototype.hiddenPrimitives[info.selector]) {
@@ -44,33 +44,190 @@ function FTRoboSnap() {
         }
     }
 
-    var original_initblocks = SpriteMorph.prototype.initBlocks;
-    SpriteMorph.prototype.initBlocks = function() {
-        // Call the original init to set up SpriteMorph.prototype.blocks
-        original_initblocks.apply(this, arguments);
-
-        // Patch our blocks into SpriteMorph.prototype.blocks
+    function monkeyPatchBlocks(target) {
         Object.keys(FTRoboSnap.blocks).forEach(function(category){
             FTRoboSnap.blocks[category].forEach(function(spec){
-                SpriteMorph.prototype.blocks[spec.selector] = spec;
+                target.prototype.blocks[spec.selector] = spec;
             })
         });
     }
+
+    var original_initblocks = SpriteMorph.prototype.initBlocks;
+    SpriteMorph.prototype.initBlocks = function() {
+        original_initblocks.apply(this, arguments);
+        monkeyPatchBlocks(SpriteMorph);
+    };
 
     SpriteMorph.prototype.blockTemplates = monkeyPatchBlockTemplates(SpriteMorph);
     StageMorph.prototype.blockTemplates = monkeyPatchBlockTemplates(StageMorph);
 
     var unpatchedLabelPart = SyntaxElementMorph.prototype.labelPart;
     SyntaxElementMorph.prototype.labelPart = function (spec) {
-        var spec_or_constructor = FTRoboSnap.labelSpecs[spec];
+        var spec_or_constructor = FTRoboSnap.labelspecs[spec];
         if (typeof(spec_or_constructor) === 'function') {
             return spec_or_constructor(spec);
         } else if (typeof(spec_or_constructor) === 'string') {
             spec = spec_or_constructor;
         }
         return unpatchedLabelPart.apply(this, arguments);
+    };
+};
+
+
+// our specialized label part specs definitions. The entries
+// may be either functions that create the appropriate morph, or
+// strings to translate a custom label spec to a standard label spec
+FTRoboSnap.prototype.labelspecs = function() {
+    var labelspecs = {
+        "$ftrobo"           : ftlogo,
+        "%ftroboInput"      : choice(false, enumchoice("I", 8), "I1"),
+        "%ftroboOutput"     : choice(false, enumchoice("O", 8), "O1"),
+        "%ftroboCounter"    : choice(false, enumchoice("C", 4), "C1"),
+        "%ftroboMotor"      : choice(false, enumchoice("M", 4), "M1"),
+        "%ftroboMotorList"  : function(){ return new MultiArgMorph("%ftroboMotor", null, 1); },
+        "%ftroboMotorOrNone": choice(false, enumchoice("M", 4), ""),
+        "%ftroboOutputValue": choice(true, {'0 (off)' : 0, '512 (max)': 512}, 0),
+        "%ftroboMotorValue" : choice(true, {'+512 (forward)' : 512, '0 (stop)': "-", '-512 (back)' : -512}, 0),
+        "%ftroboSteps"      : function() { var r = new InputSlotMorph(null, true); r.setContents('\u221e'); return r; },
+    };
+
+    // "ft" logo image
+    var ftlogo_costume = undefined;
+    var img = new Image();
+    img.onload = function () {
+        var canvas = newCanvas(new Point(img.width, img.height));
+        canvas.getContext('2d').drawImage(img, 0, 0);
+        ftlogo_costume = new Costume(canvas, "ft");
+    };
+    img.src = "ft.png";
+    function ftlogo() {
+        return ftlogo_costume ? new SymbolMorph(ftlogo_costume, 12) : new StringMorph("ft");
+    }
+
+    // private helper functions
+    function choice(editable, choices, initial, numeric) {
+        return function() {
+        var part = new InputSlotMorph(
+            null,
+            numeric || typeof(initial) == 'number',
+            choices,
+            !editable
+        );
+        if (initial) {
+            part.setContents([choices[initial]]);
+        }
+        return part;
+    }}
+    function enumchoice(prefix, n) {
+        var result = {};
+        for (var i = 1; i <= n; i++) {
+            var value = prefix + i;
+            result[value] = value;
+        }
+        return result;
+    }
+
+    return labelspecs;
+}();
+
+
+// FTRoboSnap block definitions and implementations.
+// A block definition is an object with the properties
+// * id: the selector (=id) of this block. Will be prefixed with
+//   "ftrobo" for patching the imp into SpriteMorph/StageMorph/Process
+// * type: the type of the block: "command", "predicate", "reporter" ...
+// * spec: the block spec. Will be prefixed with "$ftrobo " before being
+//         patched into SpriteMorph.blocks
+// * defaults: the parameter defaults for the block. Optional
+// * impl: the block implementation funtion.
+// * category: the category for the block. Optional, defaults to "other"
+// * palette: the palette where the block will be placed. Optional, defaults
+//            to the category of the block (or to the "variables" palette
+//            if category is "other")
+//
+// block specs will appear in their respective palette in the same order as they
+// appear in the FTRoboSnap.blockdefs list.
+FTRoboSnap.prototype.blockdefs = [
+{
+    id: "SetOutput", category: "motion", type: "command",
+    spec: "set %ftroboOutput to %ftroboOutputValue",
+    defaults: ["O1", null],
+    impl: function() {
+        alert("Not yet implemented...");
+    }
+},
+{
+    id: "SetMotor", category: "motion", type: "command",
+    spec: "run %ftroboMotorList at speed %ftroboMotorValue %br and stop after %ftroboSteps steps",
+    // defaults don't work right with a MultiArgMorph as first input slot...
+    impl: function() {
+        this.bubble("Not yet implemented...", true);
+    }
+},
+{
+    id: "IsMotorOn", category: "motion", type: "predicate",
+    spec: "motor %ftroboMotor is running?",
+    defaults: ["M1"],
+    impl: function() {
+        this.bubble("Not yet implemented...", true);
+    }
+},
+{
+    id: "IsSwitchClosed", category: "sensing", type: "predicate",
+    spec: "switch %ftroboInput is on?",
+    defaults: ["I1"],
+    impl: function() {
+        this.bubble("Not yet implemented...", true);
+    }
+},
+{
+    id : "CounterValue", category: "sensing", type: "reporter",
+    spec: "current value of %ftroboCounter",
+    defaults: ["C1"],
+    impl: function() {
+        this.bubble("Not yet implemented...", true);
+    }
+},
+{
+    id: "InputValue", category: "sensing", type: "reporter",
+    spec: "current value of %ftroboInput",
+    defaults: ["I1"],
+    impl: function() {
+        this.bubble("Not yet implemented...", true);
     }
 }
+];
+
+FTRoboSnap.prototype.blockdefs.map(function(spec) {
+    var selector = "ftrobo" + spec.id;
+    SpriteMorph.prototype[selector] = spec.impl;
+    StageMorph.prototype[selector] = spec.impl;
+})
+
+FTRoboSnap.prototype.blocks = function() {
+    var blocks = {};
+    for (var idx in FTRoboSnap.prototype.blockdefs) {
+        var def = FTRoboSnap.prototype.blockdefs[idx];
+        var palette = def.palette || def.category;
+        var specs = blocks[palette];
+        if (!specs) {
+            specs = [];
+            blocks[palette] = specs;
+        }
+        var spec = {
+            selector : "ftrobo" + def.id,
+            spec : "$ftrobo " + def.spec,
+            category: def.category,
+            defaults: def.defaults,
+            type: def.type
+
+        };
+        specs.push(spec);
+        blocks[palette] = specs;
+    }
+    return blocks;
+}();
+
 
 FTRoboSnap.prototype.monkeyPatchTranslation = function(script) {
     var install_language_handler = script.onload
@@ -95,105 +252,9 @@ FTRoboSnap.prototype.monkeyPatchTranslation = function(script) {
     document.head.appendChild(orig_translation);
     orig_translation.src = orig_src;
 
-}
-// our specialized label part specs definitions. The entries
-// may be either functions that create the appropriate morph, or
-// strings to translate a custom label spec to a standard label spec
-FTRoboSnap.prototype.labelSpecs = function() {
-    function choice(editable, choices, initial) {
-        return function() {
-        var part = new InputSlotMorph(
-            null,
-            typeof(initial) == 'number',
-            choices,
-            !editable
-        );
-        if (initial) {
-            part.setContents([choices[initial]]);
-        }
-        return part;
-    }}
-    function enumchoice(prefix, n) {
-        var result = {}
-        for (var i = 1; i <= n; i++) {
-            var value = prefix + i;
-            result[value] = value;
-        }
-        return result;
-    }
+};
 
-    var labelSpecs = {
-
-        "$ftrobo" : "$robot", // map our prefix to a robot image
-        // TODO
-        "%ftroboInput" :      choice(false, enumchoice("I", 8), "I1"),
-        "%ftroboOutput" :     choice(false, enumchoice("O", 8), "O1"),
-        "%ftroboCounter" :    choice(false, enumchoice("C", 4), "C1"),
-        "%ftroboMotor" :      choice(false, enumchoice("M", 4), "M1"),
-        "%ftroboMotorOrNone": choice(false, enumchoice("M", 4), null),
-        "%ftroboOutputValue" :choice(true, {'0 (off)' : 0, '512 (max)': 512}, 0),
-        "%ftroboMotorValue" : choice(true, {'+512 (forward)' : 512, '0 (stop)': '0', '-512 (back)' : -512}, 0),
-    }
-    return labelSpecs;
-}();
-
-// Block specs by category, in palette order.
-// Our block specs have an additional property "selector"
-// which defines the selector for the block, and they may
-// omit the "category" (defaults to the category of the
-// palette the block is placed in).
-// Note: the selector is automatically prefixed with "ftrobo" in order
-// to avoid naming collisons with standard blocks, and the spec is prefixed
-// with "$ftrobo " in order to make our blocks easily identifiable
-//
-FTRoboSnap.prototype.blocks = function() {
-
-    function blockspec(selector, type, spec, defaults, category) {
-        return {
-            selector: "ftrobo" + selector,
-            type: type,
-            spec: "$ftrobo " + spec,
-            defaults: defaults,
-            category: category
-        };
-    }
-    function command(selector, spec, defaults, category) {
-        return blockspec(selector, "command", spec, defaults, category);
-    }
-    function predicate(selector, spec, defaults, category) {
-        return blockspec(selector, "predicate", spec, defaults, category);
-    }
-    function reporter(selector, spec, defaults, category) {
-        return blockspec(selector, "reporter", spec, defaults, category);
-    }
-
-    var blockspecs = {
-        motion: [
-            command("SetOutput", "set %ftroboOutput to %ftroboOutputValue", ["O1", 0]),
-            command("SetMotor", "run %ftroboMotor synchronized to %ftroboMotorOrNone %br at speed %ftroboMotorValue for %n steps",
-                    ["M1", null, 0, '\u221e']),
-            predicate("IsMotorOn", "motor %ftroboMotor is running?", ["M1"]),
-        ],
-        sensing: [
-            predicate("IsSwitchClosed", "switch %ftroboInput is on?", ["I1"]),
-            reporter("CounterValue", "current value of %ftroboCounter", ["C1"]),
-            reporter("InputValue", "current value of %ftroboInput", ["I1"]),
-        ]
-    }
-
-    Object.keys(blockspecs).forEach(function(category){
-        blockspecs[category].forEach(function(spec){
-            spec.category = spec.category ? spec.category : category;
-            SpriteMorph.prototype.blocks[spec.selector] = spec;
-        })
-    });
-    return blockspecs;
-}();
-
-// Patch our block specs into SpriteMorph.prototype.blocks
-
-var FTRoboSnap = new FTRoboSnap()
-
+FTRoboSnap = new FTRoboSnap();
 
 // IDE startup. Copied here from snap.html because I like my JavaScript code
 // to reside in .js files...

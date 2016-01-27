@@ -22,12 +22,12 @@
 
 FTRoboSnap.dict.de = {
 
-    // Block labels
+    /**** Block labels. ****/
     "$ftrobo set %ftroboOutput to %ftroboOutputValue":
         "$ftrobo setze %ftroboOutput auf %ftroboOutputValue",
 
-    "$ftrobo run %ftroboMotor synchronized to %ftroboMotorOrNone %br at speed %ftroboMotorValue for %n steps":
-        "$ftrobo bewege %ftroboMotor synchron zu %ftroboMotorOrNone %br bei Tempo %ftroboMotorValue um %n Schritte",
+    "$ftrobo run %ftroboMotorList at speed %ftroboMotorValue %br and stop after %ftroboSteps steps":
+        "$ftrobo starte %ftroboMotorList mit Tempo %ftroboMotorValue %br und stoppe nach %ftroboSteps Schritten",
 
     "$ftrobo switch %ftroboInput is on?":
         "$ftrobo Schalter %ftroboInput ist an?",
@@ -41,12 +41,12 @@ FTRoboSnap.dict.de = {
     "$ftrobo current value of %ftroboInput":
         "$ftrobo Wert von %ftroboInput",
 
-    // Menu items
-    // single output
+    /**** Menu items for input slot dropdowns  ****/
+    // %ftroboOutputValue (single output range hints)
     "0 (off)": "0 (aus)",
     "512 (max)": "512 (maximal)",
 
-    // motor outputs
+    // %ftroboMotorValue (motor output range hints)
     "+512 (forward)" : "+512 (vorwärts)",
     "0 (stop)": "0 (stop)",
     "-512 (back)" : "-512 (rückwärts)",
