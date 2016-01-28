@@ -8241,7 +8241,7 @@ SymbolMorph.prototype.setLabelColor = function (
     shadowColor,
     shadowOffset
 ) {
-    this.shadowOffset = shadowOffset;
+    this.shadowOffset = shadowOffset || new Point(0,0);
     this.shadowColor = shadowColor;
     this.setColor(textColor);
 };
