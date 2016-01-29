@@ -258,15 +258,17 @@ FTRoboSnap.prototype.blockdefs = [
 },
 {
     id: "SetSpeed", category: "motion", type: "command",
-    spec: "set %ftroboMotor to speed %ftroboMotorValue",
+    spec: "set speed of %ftroboMotor to %ftroboMotorValue",
     defaults: ["M1", null],
     impl: function(motor, value) {
         if (!FTRoboSnap.controller().configuration[motor]) {
             throw new FTRoboError(localize("Output is not enabled"))
         }
-        var msg = { request: "set" };
-        msg[motor] = value;
-        FTRoboSnap.send(msg, true);
+        if (this.ftroboIsMotorOn(motor)) {
+            var msg = { request: "set" };
+            msg[motor] = value;
+            FTRoboSnap.send(msg, true);
+        }
     }
 },
 {
