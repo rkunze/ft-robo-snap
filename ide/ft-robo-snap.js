@@ -55,7 +55,6 @@ function FTRoboSnap() {
         "iostate": function(data) {
             for (var key in data) {
                 var is_changed = (controller.iostate[key] != data[key]);
-                console.log(key, controller.iostate[key], data[key], "changed?", is_changed);
                 controller.iostate[key] = data[key];
                 controller.changed[key] |= is_changed;
             }
@@ -67,7 +66,6 @@ function FTRoboSnap() {
     };
 
     function handle_status(message) {
-        console.log(message);
         for (var key in message) {
             var action = status_handlers[key];
             if (action) { action(message[key]); }
