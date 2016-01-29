@@ -29,17 +29,18 @@ FTRoboSnap.dict.de = {
     "$ftrobo run %ftroboMotorList at speed %ftroboMotorValue %br and stop after %ftroboSteps steps":
         "$ftrobo starte %ftroboMotorList mit Tempo %ftroboMotorValue %br und stoppe nach %ftroboSteps Schritten",
 
-    "$ftrobo switch %ftroboInput is on?":
-        "$ftrobo Schalter %ftroboInput ist an?",
+    "$ftrobo is switch %ftroboInput on?":
+        "$ftrobo ist Schalter %ftroboInput an?",
 
-    "$ftrobo motor %ftroboMotor is running?":
-        "$ftrobo Motor %ftroboMotor läuft?",
+    "$ftrobo is motor %ftroboMotor running?":
+        "$ftrobo läuft Motor %ftroboMotor ?",
 
     "$ftrobo current value of %ftroboCounter":
         "$ftrobo Zählerstand von %ftroboCounter",
 
     "$ftrobo current value of %ftroboInput":
         "$ftrobo Wert von %ftroboInput",
+
 
     /**** Menu items for input slot dropdowns  ****/
     // %ftroboOutputValue (single output range hints)

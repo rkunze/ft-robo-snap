@@ -13,13 +13,94 @@
 /*
    global
    SpriteMorph, StageMorph, SnapTranslator, WorldMorph, IDE_Morph,
-   SyntaxElementMorph, requestAnimationFrame, MultiArgMorph,
-   InputSlotMorph, SymbolMorph, newCanvas, Costume, Point, StringMorph
+   SyntaxElementMorph, requestAnimationFrame, MultiArgMorph, localize
+   InputSlotMorph, SymbolMorph, newCanvas, Costume, Point, StringMorph,
+   Process
 */
 
 
 function FTRoboSnap() {
     this.dict = {};
+
+    function init_controller() {
+        return {
+            is_online : false,
+            name : undefined,
+            version : undefined,
+            mode: "disconnected",
+            configuration: {},
+            iostate: {},
+            errors: [],
+        };
+    }
+
+    var controller = init_controller();
+
+    this.controller = function() { return controller; };
+
+    var dummyConnection = {
+        send: function() {
+            throw FTRoboError(localize('No connection to FT Robo TXT'));
+        }
+    };
+
+    var status_handlers = {
+        "controller": function(data) {
+            controller.name = data.name || controller.name;
+            controller.version = data.version || controller.version;
+            controller.mode = data.mode || controller.mode;
+            controller.is_online = controller.mode == "online";
+        },
+        "iostate": function(data) {
+            for (var key in data) {
+                controller.iostate[key] = data[key];
+            }
+        },
+        "configuration": function(data) {
+            controller.configuration = data;
+        }
+    };
+
+    function handle_status(message) {
+        console.log(message);
+        for (var key in message) {
+            var action = status_handlers[key];
+            if (action) { action(message[key]); }
+        }
+    }
+
+    var ftroboConnection = dummyConnection;
+    function connectFTRoboTXT() {
+        var conn = new WebSocket("ws://" + window.location.host + "/control");
+        conn.onclose = function() {
+            console.log("Lost connection to Robo TXT, reconnecting...");
+            controller = init_controller();
+            connectFTRoboTXT();
+        };
+        conn.onopen = function() {
+            ftroboConnection = conn;
+        };
+        conn.onmessage = function(event) {
+            var message = JSON.parse(event.data);
+            var type = message.reply;
+            if (type == "status") {
+                handle_status(message);
+            } else {
+                console.log(message);
+                controller.errors.push(message)
+            }
+
+        };
+    }
+
+    connectFTRoboTXT();
+
+    this.send = function(message, online_mode_required) {
+        if (online_mode_required && !controller.is_online) {
+            throw new FTRoboError(localize("Controller is offline"));
+        }
+        ftroboConnection.send(JSON.stringify(message));
+    };
 
     function blockFromInfo(info) {
         if (StageMorph.prototype.hiddenPrimitives[info.selector]) {
@@ -71,8 +152,19 @@ function FTRoboSnap() {
         }
         return unpatchedLabelPart.apply(this, arguments);
     };
-};
+}
 
+function FTRoboError(message) {
+    this.message = message;
+    if ("captureStackTrace" in Error)
+        Error.captureStackTrace(this, FTRoboError);
+    else
+        this.stack = (new Error()).stack;
+}
+
+FTRoboError.prototype = Object.create(Error.prototype);
+FTRoboError.prototype.name = "FT Robo Error";
+FTRoboError.prototype.constructor = FTRoboError;
 
 // our specialized label part specs definitions. The entries
 // may be either functions that create the appropriate morph, or
@@ -86,9 +178,12 @@ FTRoboSnap.prototype.labelspecs = function() {
         "%ftroboMotor"      : choice(false, enumchoice("M", 4), "M1"),
         "%ftroboMotorList"  : function(){ return new MultiArgMorph("%ftroboMotor", null, 1); },
         "%ftroboMotorOrNone": choice(false, enumchoice("M", 4), ""),
-        "%ftroboOutputValue": choice(true, {'0 (off)' : 0, '512 (max)': 512}, 0),
-        "%ftroboMotorValue" : choice(true, {'+512 (forward)' : 512, '0 (stop)': "-", '-512 (back)' : -512}, 0),
+        "%ftroboMotorOrOutput": choice(false, enumchoice("M", 4, {"O1/O2":"O1/O2", "O3/O4":"O3/O4", "O5/O6":"O5/O6","O7/O8":"O7/O8"}), "M1"),
+        "%ftroboOutputValue": choice(true, {'0 (off)' : '0', '512 (max)': 512}, 0),
+        "%ftroboMotorValue" : choice(true, {'+512 (forward)' : 512, '0 (stop)': '0', '-512 (back)' : -512}, 0),
         "%ftroboSteps"      : function() { var r = new InputSlotMorph(null, true); r.setContents('\u221e'); return r; },
+        "%ftroboMode"       : choice(false, { "online" : "online", "offline" : "offline"}, "online"),
+        "%ftroboMotorOrOutputList": function(){ return new MultiArgMorph("%ftroboMotorOrOutput"); },
     };
 
     // "ft" logo image
@@ -109,17 +204,17 @@ FTRoboSnap.prototype.labelspecs = function() {
         return function() {
         var part = new InputSlotMorph(
             null,
-            numeric || typeof(initial) == 'number',
+            typeof(initial) == 'number',
             choices,
             !editable
         );
-        if (initial) {
-            part.setContents([choices[initial]]);
+        if (typeof(initial) !== 'undefined') {
+            part.setContents(initial);
         }
         return part;
     }}
-    function enumchoice(prefix, n) {
-        var result = {};
+    function enumchoice(prefix, n, data) {
+        var result = data || {};
         for (var i = 1; i <= n; i++) {
             var value = prefix + i;
             result[value] = value;
@@ -152,57 +247,193 @@ FTRoboSnap.prototype.blockdefs = [
     id: "SetOutput", category: "motion", type: "command",
     spec: "set %ftroboOutput to %ftroboOutputValue",
     defaults: ["O1", null],
-    impl: function() {
-        alert("Not yet implemented...");
+    impl: function(output, value) {
+        if (!FTRoboSnap.controller().configuration[output]) {
+            throw new FTRoboError(localize("Output is not enabled"))
+        }
+        var msg = { request: "set" };
+        msg[output] = value;
+        FTRoboSnap.send(msg, true);
+    }
+},
+{
+    id: "SetSpeed", category: "motion", type: "command",
+    spec: "set %ftroboMotor to speed %ftroboMotorValue",
+    defaults: ["M1", null],
+    impl: function(motor, value) {
+        if (!FTRoboSnap.controller().configuration[motor]) {
+            throw new FTRoboError(localize("Output is not enabled"))
+        }
+        var msg = { request: "set" };
+        msg[motor] = value;
+        FTRoboSnap.send(msg, true);
     }
 },
 {
     id: "SetMotor", category: "motion", type: "command",
     spec: "run %ftroboMotorList at speed %ftroboMotorValue %br and stop after %ftroboSteps steps",
     // defaults don't work right with a MultiArgMorph as first input slot...
-    impl: function() {
-        this.bubble("Not yet implemented...", true);
+    impl: function(motors, speed, step) {
+        if (motors.contents.length > 2) {
+            throw new FTRoboError(localize("Cannot synchronize more than two motors"));
+        }
+        var motor = motors.contents[0];
+        var syncto = motors.contents[1];
+        if (!FTRoboSnap.controller().configuration[motor] || (syncto && !FTRoboSnap.controller().configuration[syncto])) {
+            throw new FTRoboError(localize("Motor is not enabled"))
+        }
+        var steps = (step == "" || step == "\u221e") ? "unbounded" : step;
+        var msg = { request: "set" };
+        msg[motor] = { speed: speed + 0, steps: steps, syncto : syncto };
+        FTRoboSnap.send(msg, true);
+        FTRoboSnap.controller().iostate[motor] = "on";
     }
 },
 {
     id: "IsMotorOn", category: "motion", type: "predicate",
-    spec: "motor %ftroboMotor is running?",
+    spec: "is motor %ftroboMotor running?",
     defaults: ["M1"],
-    impl: function() {
-        this.bubble("Not yet implemented...", true);
+    impl: function(motor) {
+        return FTRoboSnap.controller().iostate[motor] == "on";
     }
 },
 {
     id: "IsSwitchClosed", category: "sensing", type: "predicate",
-    spec: "switch %ftroboInput is on?",
+    spec: "is switch %ftroboInput on?",
     defaults: ["I1"],
-    impl: function() {
-        this.bubble("Not yet implemented...", true);
+    impl: function(input) {
+        return FTRoboSnap.controller().iostate[input] > 0;
     }
 },
 {
     id : "CounterValue", category: "sensing", type: "reporter",
     spec: "current value of %ftroboCounter",
     defaults: ["C1"],
-    impl: function() {
-        this.bubble("Not yet implemented...", true);
+    impl: function(counter) {
+        return FTRoboSnap.controller().iostate[counter];
     }
 },
 {
     id: "InputValue", category: "sensing", type: "reporter",
     spec: "current value of %ftroboInput",
     defaults: ["I1"],
-    impl: function() {
-        this.bubble("Not yet implemented...", true);
+    impl: function(input) {
+        return FTRoboSnap.controller().iostate[input];
     }
-}
+},
+{
+    id: "StopAll", category: "motion", type: "command",
+    spec: "turn off all ouptuts",
+    impl: function(input) {
+        FTRoboSnap.send({request: "off"});
+        FTRoboSnap.controller().iostate = {};
+    }
+},
+{
+    id: "SetMode", category: "other", palette: "variables", type: "command",
+    spec: "set mode to %ftroboMode",
+    defaults: ["online"],
+    impl: function(mode) {
+        if (mode == FTRoboSnap.controller().mode) {
+            if (this.context.startTime) {
+                // When this.startTime is set here, we've just succeded in
+                // switiching modes. Time do do some housekeeping...
+                if (mode == "online") {
+                    // Request the current i/o state after switching
+                    // from offline to online mode...
+                    FTRoboSnap.send({request : "get" });
+                } else {
+                    // ... and reset the i/o state to "everything off" after
+                    // switching to offline mode
+                    FTRoboSnap.controller().iostate = {}
+                }
+            }
+            return null;
+        }
+        if (!this.context.startTime) {
+            this.context.startTime = Date.now();
+            if (mode == "offline") {
+                FTRoboSnap.send({request : "off"});
+            }
+            FTRoboSnap.send({request : "configure", mode: mode});
+        }
+        var now = Date.now();
+        if ((now - this.context.startTime) >= 5000) {
+            // Time out after 5 seconds
+            throw new FTRoboError(localize("Failed to set mode to " + mode));
+        } else if (((now - this.context.startTime) % 1000) < 10 ) {
+            // retry once a second, allowing a fuzz of ~ 10 ms
+            FTRoboSnap.send({request : "configure", mode: mode});
+        }
+
+        this.pushContext('doYield');
+        this.pushContext();
+    },
+    patch_target: Process.prototype
+},
+{
+    id: "EnableOutput", category: "other", palette: "variables", type: "command",
+    spec: "enable output %ftroboMotorOrOutputList",
+    defaults: ["M1"],
+    impl: function(outputs) {
+        if (!this.context.startTime) {
+            this.context.startTime = Date.now();
+            var conf = { request : "configure", "default": "unused" };
+            for (var idx =0; idx < outputs.contents.length; idx++) {
+                var key = outputs.contents[idx];
+                var conf_value = (key[0]=="M")?"motor":"output";
+                var conf_key = FTRoboSnap.output_conf_keys[key];
+                var existing_conf = conf[conf_key];
+                if (existing_conf && (existing_conf !== conf_value)) {
+                    throw new FTRoboError(conf_key + " " + localize("cannot be used as motor and individual outputs at the same time"));
+                }
+                conf[conf_key] = conf_value;
+            }
+            FTRoboSnap.controller().configuration.waiting_for_reply = true;
+            FTRoboSnap.send(conf);
+        } else if (!FTRoboSnap.controller().configuration.waiting_for_reply) {
+            return null;
+        }
+        if ((Date.now() - this.context.startTime) >= 2000) {
+            // Time out after 2 seconds
+            throw new FTRoboError(localize("Failed to configure outputs"));
+        }
+
+        this.pushContext('doYield');
+        this.pushContext();
+    },
+    patch_target: Process.prototype
+},
 ];
+
+FTRoboSnap.prototype.output_conf_keys = {
+    "M1": "M1/O1,O2",
+    "M2": "M2/O3,O4",
+    "M3": "M3/O5,O6",
+    "M4": "M4/O7,O8",
+    "O1": "M1/O1,O2",
+    "O3": "M2/O3,O4",
+    "O5": "M3/O5,O6",
+    "O7": "M4/O7,O8",
+    "O2": "M1/O1,O2",
+    "O4": "M2/O3,O4",
+    "O6": "M3/O5,O6",
+    "O8": "M4/O7,O8",
+    "O1/O2": "M1/O1,O2",
+    "O3/O4": "M2/O3,O4",
+    "O5/O6": "M3/O5,O6",
+    "O7/O8": "M4/O7,O8",
+}
 
 FTRoboSnap.prototype.blockdefs.map(function(spec) {
     var selector = "ftrobo" + spec.id;
-    SpriteMorph.prototype[selector] = spec.impl;
-    StageMorph.prototype[selector] = spec.impl;
-})
+    if (spec.patch_target) {
+        spec.patch_target[selector] = spec.impl;
+    } else {
+        SpriteMorph.prototype[selector] = spec.impl;
+        StageMorph.prototype[selector] = spec.impl;
+    }
+});
 
 FTRoboSnap.prototype.blocks = function() {
     var blocks = {};
