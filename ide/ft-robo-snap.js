@@ -30,6 +30,7 @@ function FTRoboSnap() {
             mode: "disconnected",
             configuration: {},
             iostate: {},
+            changed: {},
             errors: [],
         };
     }
@@ -53,9 +54,13 @@ function FTRoboSnap() {
         },
         "iostate": function(data) {
             for (var key in data) {
+                var is_changed = (controller.iostate[key] != data[key]);
+                console.log(key, controller.iostate[key], data[key], "changed?", is_changed);
                 controller.iostate[key] = data[key];
+                controller.changed[key] |= is_changed;
             }
         },
+
         "configuration": function(data) {
             controller.configuration = data;
         }
@@ -87,7 +92,7 @@ function FTRoboSnap() {
                 handle_status(message);
             } else {
                 console.log(message);
-                controller.errors.push(message)
+                controller.errors.push(message);
             }
 
         };
@@ -122,14 +127,14 @@ function FTRoboSnap() {
                 Array.prototype.push.apply(blocks, my_blocks.map(blockFromInfo));
             }
             return blocks;
-        }
+        };
     }
 
     function monkeyPatchBlocks(target) {
         Object.keys(FTRoboSnap.blocks).forEach(function(category){
             FTRoboSnap.blocks[category].forEach(function(spec){
                 target.prototype.blocks[spec.selector] = spec;
-            })
+            });
         });
     }
 
@@ -179,6 +184,7 @@ FTRoboSnap.prototype.labelspecs = function() {
         "%ftroboMotorList"  : function(){ return new MultiArgMorph("%ftroboMotor", null, 1); },
         "%ftroboMotorOrNone": choice(false, enumchoice("M", 4), ""),
         "%ftroboMotorOrOutput": choice(false, enumchoice("M", 4, {"O1/O2":"O1/O2", "O3/O4":"O3/O4", "O5/O6":"O5/O6","O7/O8":"O7/O8"}), "M1"),
+        "%ftroboWatchAll": choice(false, enumchoice("M", 4, enumchoice("C", 4, enumchoice("I", 8))), "I1"),
         "%ftroboOutputValue": choice(true, {'0 (off)' : '0', '512 (max)': 512}, 0),
         "%ftroboMotorValue" : choice(true, {'+512 (forward)' : 512, '0 (stop)': '0', '-512 (back)' : -512}, 0),
         "%ftroboSteps"      : function() { var r = new InputSlotMorph(null, true); r.setContents('\u221e'); return r; },
@@ -289,10 +295,11 @@ FTRoboSnap.prototype.blockdefs = [
         msg[motor] = { speed: speed + 0, steps: steps, syncto : syncto };
         FTRoboSnap.send(msg, true);
         FTRoboSnap.controller().iostate[motor] = "on";
+        FTRoboSnap.controller().changed[motor] = true;
     }
 },
 {
-    id: "IsMotorOn", category: "motion", type: "predicate",
+    id: "IsMotorOn", category: "sensing", type: "predicate",
     spec: "is motor %ftroboMotor running?",
     defaults: ["M1"],
     impl: function(motor) {
@@ -324,11 +331,25 @@ FTRoboSnap.prototype.blockdefs = [
     }
 },
 {
+    id: "IsChanged", category: "sensing", type: "predicate",
+    spec: "has %ftroboWatchAll changed?",
+    defaults: ["I1"],
+    impl: function(watch) {
+        var result = FTRoboSnap.controller().changed[watch];
+        FTRoboSnap.controller().changed[watch] = false;
+        return result == true;
+    }
+},
+{
     id: "StopAll", category: "motion", type: "command",
     spec: "turn off all ouptuts",
     impl: function(input) {
         FTRoboSnap.send({request: "off"});
         FTRoboSnap.controller().iostate = {};
+        var changed = FTRoboSnap.controller().changed
+        for (var key in changed) {
+            changed[key] = true;
+        }
     }
 },
 {
@@ -363,8 +384,8 @@ FTRoboSnap.prototype.blockdefs = [
         if ((now - this.context.startTime) >= 5000) {
             // Time out after 5 seconds
             throw new FTRoboError(localize("Failed to set mode to " + mode));
-        } else if (((now - this.context.startTime) % 1000) < 10 ) {
-            // retry once a second, allowing a fuzz of ~ 10 ms
+        } else if (((now - this.context.startTime) % 500) < 10 ) {
+            // retry twice per second, allowing a fuzz of ~ 10 ms
             FTRoboSnap.send({request : "configure", mode: mode});
         }
 
