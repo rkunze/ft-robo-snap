@@ -182,8 +182,12 @@ FTRoboSnap.prototype.labelspecs = function() {
         "%ftroboCounter"    : choice(false, enumchoice("C", 4), "C1"),
         "%ftroboMotor"      : choice(false, enumchoice("M", 4), "M1"),
         "%ftroboMotorList"  : function(){ return new MultiArgMorph("%ftroboMotor", null, 1); },
+        "%ftroboCounterList"  : function(){ return new MultiArgMorph("%ftroboCounter", null, 1); },
+        "%ftroboInputList"  : function(){ return new MultiArgMorph("%ftroboInput", null, 1); },
+        "%ftroboInputOrCounterList"  : function(){ return new MultiArgMorph("%ftroboInputOrCounter", null, 1); },
         "%ftroboMotorOrNone": choice(false, enumchoice("M", 4), ""),
         "%ftroboMotorOrOutput": choice(false, enumchoice("M", 4, {"O1/O2":"O1/O2", "O3/O4":"O3/O4", "O5/O6":"O5/O6","O7/O8":"O7/O8"}), "M1"),
+        "%ftroboInputOrCounter": choice(false, enumchoice("C", 4, enumchoice("I", 8)), "I1"),
         "%ftroboWatchAll": choice(false, enumchoice("M", 4, enumchoice("C", 4, enumchoice("I", 8))), "I1"),
         "%ftroboOutputValue": choice(true, {'0 (off)' : '0', '512 (max)': 512}, 0),
         "%ftroboMotorValue" : choice(true, {'+512 (forward)' : 512, '0 (stop)': '0', '-512 (back)' : -512}, 0),
@@ -255,7 +259,7 @@ FTRoboSnap.prototype.blockdefs = [
     defaults: ["O1", null],
     impl: function(output, value) {
         if (!FTRoboSnap.controller().configuration[output]) {
-            throw new FTRoboError(localize("Output is not enabled"))
+            throw new FTRoboError(localize("Output is not enabled"));
         }
         var msg = { request: "set" };
         msg[output] = value;
@@ -268,7 +272,7 @@ FTRoboSnap.prototype.blockdefs = [
     defaults: ["M1", null],
     impl: function(motor, value) {
         if (!FTRoboSnap.controller().configuration[motor]) {
-            throw new FTRoboError(localize("Output is not enabled"))
+            throw new FTRoboError(localize("Output is not enabled"));
         }
         if (this.ftroboIsMotorOn(motor)) {
             var msg = { request: "set" };
@@ -288,7 +292,7 @@ FTRoboSnap.prototype.blockdefs = [
         var motor = motors.contents[0];
         var syncto = motors.contents[1];
         if (!FTRoboSnap.controller().configuration[motor] || (syncto && !FTRoboSnap.controller().configuration[syncto])) {
-            throw new FTRoboError(localize("Motor is not enabled"))
+            throw new FTRoboError(localize("Motor is not enabled"));
         }
         var steps = (step == "" || step == "\u221e") ? "unbounded" : step;
         var msg = { request: "set" };
@@ -316,7 +320,7 @@ FTRoboSnap.prototype.blockdefs = [
 },
 {
     id : "CounterValue", category: "sensing", type: "reporter",
-    spec: "current value of %ftroboCounter",
+    spec: "current value of %ftroboCounter", watcher_toggle: true,
     defaults: ["C1"],
     impl: function(counter) {
         return FTRoboSnap.controller().iostate[counter];
@@ -350,6 +354,45 @@ FTRoboSnap.prototype.blockdefs = [
         for (var key in changed) {
             changed[key] = true;
         }
+    }
+},
+{
+    id: "WatchCounterChanges", category: "other", palette: "variables", type: "command",
+    spec: "watch %ftroboCounterList for value changes",
+    defaults: ["C1"],
+    impl: function(counters) {
+        var msg = { request: "notify" };
+        for (var idx =0; idx < counters.contents.length; idx++) {
+            msg[counters.contents[idx]] = "onchange";
+        }
+        FTRoboSnap.send(msg);
+    }
+},
+{
+    id: "WatchSwitchChanges", category: "other", palette: "variables", type: "command",
+    spec: "watch %ftroboInputList for switch state changes",
+    defaults: ["I1"],
+    impl: function(inputs) {
+        var notify = { request: "notify" };
+        var config = { request: "configure" };
+        for (var idx =0; idx < inputs.contents.length; idx++) {
+            config[inputs.contents[idx]] = "digital";
+            notify[inputs.contents[idx]] = "onchange";
+        }
+        FTRoboSnap.send(config);
+        FTRoboSnap.send(notify);
+    }
+},
+{
+    id: "StopWatching", category: "other", palette: "variables", type: "command",
+    spec: "stop watching %ftroboInputOrCounterList",
+    defaults: ["online"],
+    impl: function(watched) {
+        var msg = { request: "notify" };
+        for (var idx =0; idx < watched.contents.length; idx++) {
+            msg[watched.contents[idx]] = "off";
+        }
+        FTRoboSnap.send(msg);
     }
 },
 {
