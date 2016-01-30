@@ -62,7 +62,7 @@ function FTRoboSnap() {
 
         "configuration": function(data) {
             controller.configuration = data;
-        }
+        },
     };
 
     function handle_status(message) {
@@ -318,10 +318,10 @@ FTRoboSnap.prototype.blockdefs = [
 },
 {
     id : "CounterValue", category: "sensing", type: "reporter",
-    spec: "current value of %ftroboCounter", watcher_toggle: true,
+    spec: "current value of %ftroboCounter",
     defaults: ["C1"],
     impl: function(counter) {
-        return FTRoboSnap.controller().iostate[counter];
+        return FTRoboSnap.controller().iostate[counter] || 0;
     }
 },
 {
@@ -329,7 +329,7 @@ FTRoboSnap.prototype.blockdefs = [
     spec: "current value of %ftroboInput",
     defaults: ["I1"],
     impl: function(input) {
-        return FTRoboSnap.controller().iostate[input];
+        return FTRoboSnap.controller().iostate[input] || 0;
     }
 },
 {
@@ -384,7 +384,7 @@ FTRoboSnap.prototype.blockdefs = [
 {
     id: "StopWatching", category: "other", palette: "variables", type: "command",
     spec: "stop watching %ftroboInputOrCounterList",
-    defaults: ["online"],
+    defaults: ["I1"],
     impl: function(watched) {
         var msg = { request: "notify" };
         for (var idx =0; idx < watched.contents.length; idx++) {
