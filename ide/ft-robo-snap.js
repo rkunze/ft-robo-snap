@@ -344,7 +344,7 @@ FTRoboSnap.prototype.blockdefs = [
 },
 {
     id: "StopAll", category: "motion", type: "command",
-    spec: "turn off all ouptuts",
+    spec: "turn off all outputs",
     impl: function(input) {
         FTRoboSnap.send({request: "off"});
         FTRoboSnap.controller().iostate = {};
