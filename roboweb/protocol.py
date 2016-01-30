@@ -647,7 +647,7 @@ class IOStateConf:
                 if value is not None:
                     result[entry.name] = value
             self._next_input_check = self._calculate_next_check_time(curr.timestamp)
-        elif self._counters:
+        if self._counters:
             for entry in self._counters.viewvalues():
                 value = entry.report_and_update(prev, curr)
                 if value is not None:
