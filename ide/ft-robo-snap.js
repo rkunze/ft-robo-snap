@@ -15,12 +15,13 @@
    SpriteMorph, StageMorph, SnapTranslator, WorldMorph, IDE_Morph,
    SyntaxElementMorph, requestAnimationFrame, MultiArgMorph, localize
    InputSlotMorph, SymbolMorph, newCanvas, Costume, Point, StringMorph,
-   Process
+   Process, MorphicPreferences
 */
 
 
 function FTRoboSnap() {
     this.dict = {};
+    var ide = undefined;
 
     function init_controller() {
         return {
@@ -51,7 +52,8 @@ function FTRoboSnap() {
             controller.version = data.version || controller.version;
             controller.mode = data.mode || controller.mode;
             controller.is_online = controller.mode == "online";
-        },
+            if (FTRoboSnap.ide) { FTRoboSnap.ide.controlBar.updateLabel(); }
+       },
         "iostate": function(data) {
             for (var key in data) {
                 var is_changed = (controller.iostate[key] != data[key]);
@@ -78,10 +80,12 @@ function FTRoboSnap() {
         conn.onclose = function() {
             console.log("Lost connection to Robo TXT, reconnecting...");
             controller = init_controller();
+            if (FTRoboSnap.ide) { FTRoboSnap.ide.controlBar.updateLabel(); }
             connectFTRoboTXT();
         };
         conn.onopen = function() {
             ftroboConnection = conn;
+            if (FTRoboSnap.ide) { FTRoboSnap.ide.controlBar.updateLabel(); }
         };
         conn.onmessage = function(event) {
             var message = JSON.parse(event.data);
@@ -140,6 +144,46 @@ function FTRoboSnap() {
     SpriteMorph.prototype.initBlocks = function() {
         original_initblocks.apply(this, arguments);
         monkeyPatchBlocks(SpriteMorph);
+    };
+
+    var original_createControlBar = IDE_Morph.prototype.createControlBar;
+    IDE_Morph.prototype.createControlBar = function() {
+        original_createControlBar.apply(this, arguments);
+        var myself = this;
+        this.controlBar.updateLabel = function () {
+            var padding = 5;
+            var suffix = myself.world().isDevMode ?
+                    ' - ' + localize('development mode') : '';
+            if (controller.mode == "disconnected") {
+                suffix += " - disconnected";
+            } else {
+                suffix += " - connected to " + controller.name + " v" + controller.version;
+            }
+            if (this.label) {
+                this.label.destroy();
+            }
+            if (myself.isAppMode) {
+                return;
+            }
+
+            console.log("update label", suffix);
+
+            this.label = new StringMorph(
+                (myself.projectName || localize('untitled')) + suffix,
+                14,
+                'sans-serif',
+                true,
+                false,
+                false,
+                MorphicPreferences.isFlat ? null : new Point(2, 1),
+                myself.frameColor.darker(myself.buttonContrast)
+            );
+            this.label.color = myself.buttonLabelColor;
+            this.label.drawNew();
+            this.add(this.label);
+            this.label.setCenter(this.center());
+            this.label.setLeft(this.settingsButton.right() + padding);
+        };
     };
 
     SpriteMorph.prototype.blockTemplates = monkeyPatchBlockTemplates(SpriteMorph);
@@ -557,7 +601,8 @@ var world;
 window.onload = function () {
     world = new WorldMorph(document.getElementById('world'));
     world.worldCanvas.focus();
-    new IDE_Morph().openIn(world);
+    FTRoboSnap.ide = new IDE_Morph();
+    FTRoboSnap.ide.openIn(world);
     loop();
 };
 function loop() {
