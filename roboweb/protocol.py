@@ -219,7 +219,7 @@ class Set(Request):
           is equivalent to "unbounded". If ``steps`` is "unbounded", the motor will run until stopped by another
           command. If ``steps`` is omitted, the current setting for steps remains unchanged.
         * ``syncto``: Synchronizes the motor to another motor, i.e. makes both motors run at the same speed and for
-          the same number of steps. Allowed values are all motor ids. Synchronizing a motor to itself has no effect.
+          the same number of steps. Allowed values are all motor ids. Synchronizing a motor to itself stops synchronization.
           Note: ``syncto`` may only be specified if ``steps`` is specified as well, and the synchronization is reset
           as soon as the motor(s) stop.
 
@@ -256,17 +256,17 @@ class Set(Request):
             if isinstance(values, dict):
                 speed = values.get('speed')
                 syncto_id = values.get('syncto', None)
-                syncto = connection.configuration.get(syncto_id, None)
+                syncto = controller.getMotorSyncMaster(idx) if syncto_id is None else connection.configuration.get(syncto_id, None)
                 steps = values.get('steps', "unbounded" if is_motor_finished else None)
                 if not (isinstance(speed, int)):
                     return Error('set failed', {'id': motor, 'reason': 'invalid data: %s' % values})
                 if syncto is None and syncto_id is not None:
                     return Error('set failed', {'id': motor, 'reason': 'invalid syncto target: %s' % repr(syncto)})
-                if syncto is not None and steps is None:
+                if syncto is not None and syncto_id is not None and steps is None:
                     return Error('set failed', {'id': motor, 'reason': '"syncto" requires "steps" to be specified : %s' % repr(syncto)})
             elif isinstance(values, int):
                 speed = values
-                syncto = None
+                syncto = None if is_motor_finished else controller.getMotorSyncMaster(idx)
                 steps = "unbounded" if is_motor_finished else None
             else:
                 return Error('set failed', {'id': motor, 'reason': 'invalid data: %s' % repr(values)})
@@ -275,6 +275,9 @@ class Set(Request):
             if stop_now:
                 controller.SyncDataBegin()
                 if not is_motor_finished:
+                    if syncto is not None:
+                        controller.incrMotorCmdId(syncto)
+                        controller.setMotorDistance(syncto, 0)
                     controller.setMotorDistance(idx, 0)
                     controller.incrMotorCmdId(idx)
                 controller.setPwm(idx * 2, 0)
@@ -283,18 +286,26 @@ class Set(Request):
                 return Status(iostate={motor: "stopped"})
             else:
                 controller.SyncDataBegin()
-                if is_motor_finished or syncto is not None or steps is not None:
+                if is_motor_finished or steps is not None:
                     controller.incrMotorCmdId(idx)
-                if syncto is not None:
+                    if syncto is not None:
+                        controller.incrMotorCmdId(syncto)
+                if syncto is not None and syncto != controller.getMotorSyncMaster(idx):
                     controller.setMotorSyncMaster(idx, syncto + 1)
                     controller.setMotorSyncMaster(syncto, idx + 1)
                 if steps is not None:
                     steps = 0 if steps is "unbounded" or steps > 32767 else steps
                     controller.setMotorDistance(idx, steps)
                 if speed >= 0:
+                    if syncto is not None:
+                        controller.setPwm(syncto * 2, speed)
+                        controller.setPwm(syncto * 2 + 1, 0)
                     controller.setPwm(idx * 2, speed)
                     controller.setPwm(idx * 2 + 1, 0)
                 else:
+                    if syncto is not None:
+                        controller.setPwm(syncto * 2, 0)
+                        controller.setPwm(syncto * 2 + 1, -speed)
                     controller.setPwm(idx * 2, 0)
                     controller.setPwm(idx * 2 + 1, -speed)
                 controller.SyncDataEnd()
