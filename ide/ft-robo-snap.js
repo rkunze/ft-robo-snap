@@ -166,8 +166,6 @@ function FTRoboSnap() {
                 return;
             }
 
-            console.log("update label", suffix);
-
             this.label = new StringMorph(
                 (myself.projectName || localize('untitled')) + suffix,
                 14,
