@@ -318,7 +318,7 @@ FTRoboSnap.prototype.blockdefs = [
         }
         if (this.ftroboIsMotorOn(motor)) {
             var msg = { request: "set" };
-            msg[motor] = value;
+            msg[motor] = { speed: value };
             FTRoboSnap.send(msg, true);
         }
     }
