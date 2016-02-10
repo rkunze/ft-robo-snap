@@ -592,6 +592,7 @@ FTRoboSnap.prototype.monkeyPatchTranslation = function(script) {
 };
 
 FTRoboSnap = new FTRoboSnap();
+SpriteMorph.prototype.initBlocks();
 
 // IDE startup. Copied here from snap.html because I like my JavaScript code
 // to reside in .js files...
